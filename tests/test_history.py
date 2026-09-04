@@ -43,13 +43,41 @@ def test_parse_history_success():
     assert isinstance(page, HistoryPage)
     assert page.symbol == "1HZ75V"
     assert page.count == 5
-    assert page.pip_size == 2
+    assert page.pip_size == 2.0
     assert page.earliest is not None
     assert page.earliest.epoch == 1700000001
     assert page.earliest.price == 100.0
     assert page.earliest.timestamp == datetime(2023, 11, 14, 22, 13, 21, tzinfo=timezone.utc)
     assert page.latest.epoch == 1700000005
     assert page.ticks[0].timestamp.tzinfo is timezone.utc
+
+
+def test_pip_size_preserves_decimal_precision():
+    """Live API returns fractional pip_size (e.g. 0.01, 0.1); must not truncate to int."""
+    for raw, expected in [(0.01, 0.01), (0.1, 0.1), (0.001, 0.001), (2, 2.0)]:
+        resp = {
+            "msg_type": "history",
+            "history": {"prices": [100.0], "times": [1]},
+            "pip_size": raw,
+        }
+        page = parse_history_response(resp, symbol="X")
+        assert page.pip_size == expected
+        assert isinstance(page.pip_size, float)
+
+
+def test_pip_size_missing_or_invalid():
+    resp_missing = {
+        "msg_type": "history",
+        "history": {"prices": [1.0], "times": [1]},
+    }
+    assert parse_history_response(resp_missing, symbol="X").pip_size is None
+
+    resp_bad = {
+        "msg_type": "history",
+        "history": {"prices": [1.0], "times": [1]},
+        "pip_size": "not-a-number",
+    }
+    assert parse_history_response(resp_bad, symbol="X").pip_size is None
 
 
 def test_parse_empty_history():
@@ -83,7 +111,8 @@ def test_parse_malformed_price():
         parse_history_response(resp, symbol="X")
 
 
-def test_parse_sorts_out_of_order():
+def test_parse_preserves_source_order():
+    """Parser must not silently re-sort ticks received from Deriv."""
     resp = {
         "msg_type": "history",
         "history": {
@@ -92,8 +121,26 @@ def test_parse_sorts_out_of_order():
         },
     }
     page = parse_history_response(resp, symbol="X")
-    assert [t.epoch for t in page.ticks] == [1, 2, 3]
-    assert [t.price for t in page.ticks] == [1.0, 2.0, 3.0]
+    assert [t.epoch for t in page.ticks] == [3, 1, 2]
+    assert [t.price for t in page.ticks] == [3.0, 1.0, 2.0]
+    # earliest/latest are still epoch-correct for pagination cursor use
+    assert page.earliest.epoch == 1
+    assert page.latest.epoch == 3
+
+
+def test_stats_detects_non_monotonic_source_order():
+    """Statistics layer reports integrity problems; parser does not hide them."""
+    resp = {
+        "msg_type": "history",
+        "history": {
+            "prices": [3.0, 1.0, 2.0],
+            "times": [3, 1, 2],
+        },
+    }
+    page = parse_history_response(resp, symbol="X")
+    stats = compute_tick_stats(page.ticks)
+    assert stats.non_monotonic_pairs == 1  # 3 -> 1 is a step backward
+    assert stats.count == 3
 
 
 def test_compute_tick_stats_basic():

@@ -64,9 +64,15 @@ Both instruments emit **exactly 1 tick per second** over the sampled window
 
 - Practical maximum per request: **1000 ticks**.
 - Data is returned chronological (oldest → newest within a page).
-- Adjacent pages with `end = earliest - 1` have **zero overlap** and a
-  1-second gap for these 1s indices.
+- Adjacent pages with `end = earliest_epoch - 1` have **zero overlap**:
+  if page N earliest is T, page N+1 latest is T−1 (no missing tick).
 - Safe cursor: always advance with `end = page.earliest.epoch - 1`.
+
+### Data integrity
+
+- `pip_size` is stored as `float | None` so values such as `0.01` / `0.1` are preserved.
+- `parse_history_response` **preserves source tick order** from Deriv (does not sort).
+- `compute_tick_stats` reports non-monotonic consecutive pairs when present.
 
 ### Six-month feasibility (extrapolated from measured 1 tick/s)
 
