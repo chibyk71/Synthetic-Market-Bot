@@ -16,9 +16,10 @@ efficient for ~15M ticks per instrument without a distributed lake.
 
 Each row: instrument (string), epoch (int64), price (float64).
 
-Writes are append-only with optional deduplication against existing
-keys for the same instrument. The store never loads the full dataset
-into memory for range reads.
+Writes are page/partition-oriented: callers should pass one page (or a
+modest batch) at a time so the full multi-month stream is never held in
+memory. Within each write, duplicates are removed both against the
+incoming batch and against existing rows on disk.
 """
 
 from __future__ import annotations
@@ -43,6 +44,11 @@ _SCHEMA = pa.schema(
     ]
 )
 
+# Soft upper bound on how many ticks we buffer per partition key while
+# streaming an iterable. Prevents unbounded growth if a caller passes a
+# very large generator without page boundaries.
+_STREAM_FLUSH_THRESHOLD = 5_000
+
 
 class ParquetTickStore:
     """Durable Parquet dataset for historical ticks."""
@@ -58,43 +64,53 @@ class ParquetTickStore:
         *,
         dedupe: bool = True,
     ) -> int:
-        """Append ticks, optionally skipping known (instrument, epoch, price) keys.
+        """Append ticks in streaming fashion.
 
-        Returns the number of rows actually written.
-        Batches by instrument and by calendar month so large streams do not
-        materialise entirely in memory beyond one batch buffer.
+        Ticks are grouped by (instrument, year, month). When a partition
+        buffer reaches :data:`_STREAM_FLUSH_THRESHOLD` rows, or when the
+        iterable ends, that partition is flushed to disk. This keeps peak
+        memory proportional to one partition batch, not the full dataset.
+
+        Deduplication (when ``dedupe=True``):
+        1. Within the incoming batch (first occurrence wins).
+        2. Against existing rows already on disk for that partition.
         """
-        batches: dict[tuple[str, int, int], list[StoredTick]] = {}
+        buffers: dict[tuple[str, int, int], list[StoredTick]] = {}
+        written = 0
+
+        def flush_key(key: tuple[str, int, int]) -> int:
+            group = buffers.pop(key, [])
+            if not group:
+                return 0
+            return self._write_partition(key[0], key[1], key[2], group, dedupe=dedupe)
+
         for tick in ticks:
             if not tick.instrument or tick.epoch < 0:
                 continue
             y, m = _year_month(tick.epoch)
             key = (tick.instrument, y, m)
-            batches.setdefault(key, []).append(tick)
+            buf = buffers.setdefault(key, [])
+            buf.append(tick)
+            if len(buf) >= _STREAM_FLUSH_THRESHOLD:
+                written += flush_key(key)
 
-        written = 0
-        for (instrument, year, month), group in batches.items():
-            path = self._partition_path(instrument, year, month)
-            path.parent.mkdir(parents=True, exist_ok=True)
-
-            if dedupe and path.exists():
-                existing = self._load_keys(path)
-                group = [t for t in group if (t.epoch, t.price) not in existing]
-            if not group:
-                continue
-
-            table = _ticks_to_table(group)
-            if path.exists():
-                old = pq.read_table(path, schema=_SCHEMA)
-                table = pa.concat_tables([old, table])
-            pq.write_table(table, path, compression="zstd")
-            written += len(group)
-            logger.debug(
-                "Wrote %s ticks to %s",
-                len(group),
-                path.relative_to(self.root),
-            )
+        for key in list(buffers):
+            written += flush_key(key)
         return written
+
+    def write_page(
+        self,
+        ticks: Sequence[StoredTick],
+        *,
+        dedupe: bool = True,
+    ) -> int:
+        """Write a single page/batch of ticks (preferred ingestion path).
+
+        Deduplicates within the page and against existing partition data.
+        """
+        if not ticks:
+            return 0
+        return self.write_ticks(ticks, dedupe=dedupe)
 
     def read_ticks(
         self,
@@ -108,9 +124,6 @@ class ParquetTickStore:
         Range semantics (half-open when both bounds set)::
 
             start_epoch <= epoch < end_epoch
-
-        If only ``start_epoch`` is set: ``epoch >= start_epoch``.
-        If only ``end_epoch`` is set: ``epoch < end_epoch``.
         """
         instrument_dir = self.ticks_dir / f"instrument={instrument}"
         if not instrument_dir.exists():
@@ -144,25 +157,64 @@ class ParquetTickStore:
                 names.append(p.name.split("=", 1)[1])
         return names
 
+    def partition_paths(self, instrument: str) -> list[Path]:
+        instrument_dir = self.ticks_dir / f"instrument={instrument}"
+        if not instrument_dir.exists():
+            return []
+        return sorted(instrument_dir.rglob("*.parquet"))
+
     def inspect(self) -> dict[str, Any]:
-        """Lightweight dataset summary without full scans of all prices."""
+        """Lightweight coverage summary via DuckDB (no full Python materialisation)."""
+        from smb.data.repository import TickRepository
+
+        repo = TickRepository(self)
         info: dict[str, Any] = {"root": str(self.root), "instruments": {}}
         for instrument in self.list_instruments():
-            count = 0
-            min_ep: int | None = None
-            max_ep: int | None = None
-            for tick in self.read_ticks(instrument):
-                count += 1
-                if min_ep is None or tick.epoch < min_ep:
-                    min_ep = tick.epoch
-                if max_ep is None or tick.epoch > max_ep:
-                    max_ep = tick.epoch
-            info["instruments"][instrument] = {
-                "tick_count": count,
-                "earliest_epoch": min_ep,
-                "latest_epoch": max_ep,
-            }
+            info["instruments"][instrument] = repo.coverage(instrument)
         return info
+
+    def _write_partition(
+        self,
+        instrument: str,
+        year: int,
+        month: int,
+        group: list[StoredTick],
+        *,
+        dedupe: bool,
+    ) -> int:
+        path = self._partition_path(instrument, year, month)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        # 1) Dedupe within incoming batch (first occurrence wins).
+        if dedupe:
+            seen: set[tuple[int, float]] = set()
+            unique: list[StoredTick] = []
+            for t in group:
+                key = (t.epoch, t.price)
+                if key in seen:
+                    continue
+                seen.add(key)
+                unique.append(t)
+            group = unique
+
+        # 2) Dedupe against existing on-disk rows.
+        if dedupe and path.exists():
+            existing = self._load_keys(path)
+            group = [t for t in group if (t.epoch, t.price) not in existing]
+        if not group:
+            return 0
+
+        table = _ticks_to_table(group)
+        if path.exists():
+            old = pq.read_table(path, schema=_SCHEMA)
+            table = pa.concat_tables([old, table])
+        pq.write_table(table, path, compression="zstd")
+        logger.debug(
+            "Wrote %s ticks to %s",
+            len(group),
+            path.relative_to(self.root),
+        )
+        return len(group)
 
     def _partition_path(self, instrument: str, year: int, month: int) -> Path:
         return (
