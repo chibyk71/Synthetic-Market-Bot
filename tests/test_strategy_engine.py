@@ -273,13 +273,12 @@ def test_post_sweep_confirmed_swing_cannot_be_msb_structure():
     assert eng._active_msb.broken_level == frozen
     assert eng._active_msb.structure_swing.price == frozen
     assert eng._active_msb.broken_level != 140.0
-    assert eng._active_msb.structure_swing.confirmed_at_epoch <= (
+    assert eng._active_msb.structure_swing.confirmed_at_epoch < (
         eng._active_sweep.sweep_candle_end_epoch
     )
 
 
 def test_post_sweep_only_structure_not_yet_confirmed_blocks_setup():
-    """Only candidate structure high is still unconfirmed at sweep time."""
     cfg = StrategyConfig(swing_x=2, msb_window_bars=5, atr_period=3)
     eng = StrategyEngine("test", cfg)
     for c in _build_confirmed_swing_low_sequence(0, 100.0):
@@ -409,8 +408,9 @@ def _full_bullish_fixture() -> tuple[list[Candle], StrategyConfig]:
     add(108, 109, 100, 102)
     add(102, 108, 101, 107)
     add(107, 115, 106, 114)
-    add(114, 116, 112, 113)
+    add(114, 114.5, 112, 113)
     add(113, 114, 111, 112)
+    add(112, 113, 111, 112)
     add(105, 108, 97, 104)
     add(104, 118, 103, 117)
     add(117, 125, 116, 124)
@@ -591,6 +591,39 @@ def test_sweep_without_msb_expires():
     eng.on_m1(m1(480, 101, 103, 100, 102))
     eng.on_m1(m1(540, 102, 104, 101, 103))
     assert eng.state == StrategyState.IDLE
+
+
+def test_sweep_cannot_use_swing_confirmed_by_sweep_candle():
+    """Swing right-side confirmation on the sweep candle must not qualify."""
+    cfg = StrategyConfig(swing_x=2, atr_period=2)
+    eng = StrategyEngine("test", cfg)
+    candles = [
+        m1(0, 106, 108, 105, 106),
+        m1(60, 106, 107, 104, 105),
+        m1(120, 105, 106, 100, 103),
+        m1(180, 103, 106, 103, 105),
+    ]
+    for c in candles:
+        eng.on_m1(c)
+    eng.on_m1(m1(240, 102, 104, 98, 101))
+    assert eng.state == StrategyState.IDLE
+    assert eng._active_sweep is None
+
+
+def test_strategy_signal_mappings_are_immutable():
+    """reference_levels and metadata must reject in-place mutation."""
+    candles, cfg = _full_bullish_fixture()
+    eng = StrategyEngine("vol75", cfg)
+    eng.on_m15(m15(0, 100, 120, 95, 110))
+    signals = eng.process(candles)
+    assert len(signals) >= 1
+    sig = signals[0]
+    with pytest.raises(TypeError):
+        sig.reference_levels["swept_level"] = 0.0  # type: ignore[index]
+    with pytest.raises(TypeError):
+        sig.metadata["extra"] = True  # type: ignore[index]
+    with pytest.raises(AttributeError):
+        sig.metadata = {"hacked": True}  # type: ignore[misc]
 
 
 def test_non_finalized_candle_rejected():
