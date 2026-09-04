@@ -224,5 +224,5 @@ class DerivClient:
         await self.connect()
         return self
 
-    async def __aexit__(self, exp_type, exp, tb) -> None:
+    async def __aexit__(self, exc_type, exc, tb) -> None:
         await self.close()
