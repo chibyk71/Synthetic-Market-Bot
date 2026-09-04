@@ -20,3 +20,11 @@ request_timeout_seconds = 15.0
 [data]
 # Local historical dataset root (Parquet). Not committed to Git.
 root = "data"
+
+# Milestone 2A — strategy research parameters (defaults mirror StrategyConfig)
+[strategy]
+swing_x = 2
+msb_window_bars = 3
+displacement_body_range_ratio = 0.60
+displacement_body_atr_ratio = 0.80
+atr_period = 14
