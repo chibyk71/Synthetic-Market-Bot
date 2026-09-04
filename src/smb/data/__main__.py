@@ -64,29 +64,48 @@ def cmd_stats(args: argparse.Namespace) -> int:
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
-    from smb.data.repository import TickRepository
+    from smb.data.repository import StorageError, TickRepository
+    from smb.data.stats import compute_dataset_stats
     from smb.data.store import ParquetTickStore
-    from smb.data.validation import validate_ticks
 
     settings = _load_settings()
     store = ParquetTickStore(_data_root(settings))
     repo = TickRepository(store)
-    instruments = (
-        [args.instrument] if args.instrument else repo.list_instruments()
-    )
+    try:
+        stats = compute_dataset_stats(repo)
+    except StorageError as exc:
+        print(f"Storage error: {exc}", file=sys.stderr)
+        return 2
+    instruments = stats.instruments
+    if args.instrument:
+        instruments = tuple(
+            i for i in instruments if i.instrument == args.instrument
+        )
+        if not instruments:
+            try:
+                cov = repo.coverage(args.instrument)
+            except StorageError as exc:
+                print(f"Storage error: {exc}", file=sys.stderr)
+                return 2
+            if cov["tick_count"] == 0:
+                print(f"No data for instrument: {args.instrument}")
+                return 0
     if not instruments:
         print("No instruments to validate.")
         return 0
     exit_code = 0
-    for instrument in instruments:
-        ticks = list(repo.iter_ticks(instrument))
-        report = validate_ticks(ticks, expected_instrument=instrument)
-        status = "OK" if report.valid else "FAIL"
-        print(f"[{status}] {instrument}: ticks={report.tick_count} "
-              f"dup={report.duplicate_count} non_mono={report.non_monotonic_count}")
-        for err in report.errors:
-            print(f"  - {err}")
-        if not report.valid:
+    for item in instruments:
+        ok = item.duplicate_count == 0 and item.non_monotonic_count == 0
+        status = "OK" if ok else "FAIL"
+        print(
+            f"[{status}] {item.instrument}: ticks={item.tick_count} "
+            f"dup={item.duplicate_count} non_mono={item.non_monotonic_count}"
+        )
+        if item.duplicate_count:
+            print(f"  - {item.duplicate_count} duplicate tick(s)")
+        if item.non_monotonic_count:
+            print(f"  - {item.non_monotonic_count} non-monotonic pair(s)")
+        if not ok:
             exit_code = 1
     return exit_code
 

@@ -8,9 +8,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from smb.data.ingest import ingest_instrument
+from smb.data.ingest import ingest_instrument, iter_history_pages
 from smb.data.models import StoredTick
-from smb.data.repository import TickRepository
+from smb.data.repository import StorageError, TickRepository
 from smb.data.stats import compute_dataset_stats
 from smb.data.store import ParquetTickStore
 from smb.data.validation import validate_ticks
@@ -95,6 +95,19 @@ def test_duplicate_ingestion_deterministic(store: ParquetTickStore):
     assert len(list(store.read_ticks("x"))) == 2
 
 
+def test_duplicate_within_incoming_batch(store: ParquetTickStore):
+    ticks = [
+        _st("x", 100, 1.0),
+        _st("x", 100, 1.0),
+        _st("x", 101, 2.0),
+        _st("x", 101, 2.0),
+    ]
+    assert store.write_page(ticks, dedupe=True) == 2
+    got = list(store.read_ticks("x"))
+    assert len(got) == 2
+    assert [t.epoch for t in got] == [100, 101]
+
+
 def test_duplicate_detection_validation():
     ticks = [
         _st("x", 1, 1.0),
@@ -137,7 +150,7 @@ def test_validate_instrument_mismatch():
     assert not report.valid
 
 
-def test_dataset_stats(store: ParquetTickStore):
+def test_dataset_stats_via_sql(store: ParquetTickStore):
     store.write_ticks([_st("vol", 100, 50.0), _st("vol", 200, 60.0)])
     stats = compute_dataset_stats(TickRepository(store))
     item = stats.for_instrument("vol")
@@ -145,22 +158,55 @@ def test_dataset_stats(store: ParquetTickStore):
     assert item.tick_count == 2
     assert item.min_price == 50.0
     assert item.max_price == 60.0
+    assert item.duplicate_count == 0
+
+
+def test_coverage_detects_duplicates_without_list(store: ParquetTickStore):
+    store.write_ticks(
+        [_st("x", 1, 1.0), _st("x", 1, 1.0), _st("x", 2, 2.0)],
+        dedupe=False,
+    )
+    cov = TickRepository(store).coverage("x")
+    assert cov["tick_count"] == 3
+    assert cov["duplicate_count"] == 1
+
+
+def test_repository_raises_on_corrupt_parquet(store: ParquetTickStore, tmp_path: Path):
+    instrument_dir = store.ticks_dir / "instrument=bad"
+    part = instrument_dir / "year=2020" / "month=01"
+    part.mkdir(parents=True)
+    corrupt = part / "part-000.parquet"
+    corrupt.write_text("this is not parquet")
+    repo = TickRepository(store)
+    with pytest.raises(StorageError, match="Failed to read"):
+        list(repo.iter_ticks("bad"))
 
 
 @pytest.mark.asyncio
-async def test_ingest_incremental(store: ParquetTickStore):
-    page = HistoryPage(
+async def test_ingest_page_by_page(store: ParquetTickStore):
+    page1 = HistoryPage(
         symbol="1HZ75V",
-        ticks=(
-            _tick(1000, 10.0),
-            _tick(1001, 11.0),
-        ),
+        ticks=(_tick(2000, 10.0), _tick(2001, 11.0)),
         pip_size=0.01,
     )
+    page2 = HistoryPage(
+        symbol="1HZ75V",
+        ticks=(_tick(1000, 9.0), _tick(1001, 9.5)),
+        pip_size=0.01,
+    )
+    pages = [page1, page2]
+    write_log: list[int] = []
+    original_write_page = store.write_page
+
+    def tracking_write_page(ticks, *, dedupe=True):
+        write_log.append(len(ticks))
+        return original_write_page(ticks, dedupe=dedupe)
+
+    store.write_page = tracking_write_page  # type: ignore[method-assign]
+
     client = AsyncMock()
     with pytest.MonkeyPatch.context() as mp:
-        from smb.deriv import history as hist_mod
-        from smb.deriv import symbols as sym_mod
+        from smb.data import ingest as ingest_mod
 
         fake_info = MagicMock()
         fake_info.symbol = "1HZ75V"
@@ -171,26 +217,51 @@ async def test_ingest_incremental(store: ParquetTickStore):
         def fake_resolve(name, symbols):
             return fake_info
 
-        async def fake_pages(client, symbol, pages=1, count_per_page=1000, end="latest"):
-            return [page]
+        call_count = {"n": 0}
 
-        from smb.data import ingest as ingest_mod
+        async def fake_fetch(client, symbol, *, count, end, start=1):
+            idx = call_count["n"]
+            call_count["n"] += 1
+            if idx == 1:
+                assert len(write_log) == 1
+            return pages[idx]
 
         mp.setattr(ingest_mod, "load_active_symbols", fake_load)
         mp.setattr(ingest_mod, "resolve_symbol", fake_resolve)
-        mp.setattr(ingest_mod, "fetch_ticks_paginated", fake_pages)
+        mp.setattr(ingest_mod, "fetch_ticks", fake_fetch)
 
         result = await ingest_instrument(
             client,
             store,
             instrument="volatility_75_1s",
             display_name="Volatility 75 (1s) Index",
-            pages=1,
+            pages=2,
         )
-    assert result.ticks_written == 2
-    assert result.symbol == "1HZ75V"
+
+    assert result.pages_fetched == 2
+    assert result.ticks_written == 4
+    assert write_log == [2, 2]
     got = list(store.read_ticks("volatility_75_1s"))
-    assert len(got) == 2
+    assert len(got) == 4
+
+
+@pytest.mark.asyncio
+async def test_iter_history_pages_stops_on_empty():
+    client = AsyncMock()
+    with pytest.MonkeyPatch.context() as mp:
+        from smb.data import ingest as ingest_mod
+
+        empty = HistoryPage(symbol="X", ticks=(), pip_size=None)
+
+        async def fake_fetch(client, symbol, *, count, end, start=1):
+            return empty
+
+        mp.setattr(ingest_mod, "fetch_ticks", fake_fetch)
+        collected = []
+        async for page in iter_history_pages(client, "X", pages=5):
+            collected.append(page)
+        assert len(collected) == 1
+        assert collected[0].count == 0
 
 
 def test_stored_to_replay_to_candles(store: ParquetTickStore):
