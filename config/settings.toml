@@ -16,3 +16,7 @@ name = "Step Index 100"
 # Verified against https://developers.deriv.com/llms/active-symbols.md
 websocket_url = "wss://api.derivws.com/trading/v1/options/ws/public"
 request_timeout_seconds = 15.0
+
+[data]
+# Local historical dataset root (Parquet). Not committed to Git.
+root = "data"
