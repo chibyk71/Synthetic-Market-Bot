@@ -1,7 +1,7 @@
 """Deterministic chronological strategy engine (Milestone 2A).
 
 Consumes completed M1 and M15 candles in time order, detects the mechanical
-setup sequence, and emits immutable StrategySignal objects.
+setup sequence, and emits immutable :class:`StrategySignal` objects.
 
 No trades, risk, execution, or live data.
 """
@@ -43,9 +43,12 @@ class OutOfOrderCandleError(ValueError):
 class StrategyEngine:
     """Streaming strategy engine with explicit state and no lookahead.
 
-    Feed completed candles via on_candle (or on_m1 / on_m15). Signals are
-    emitted only when the full chronological sequence completes on the
-    current candle close.
+    Chronological setup sequence (strict)::
+
+        M15 context → M1 sweep → later M1 MSB → later M1 displacement → FVG → signal
+
+    Displacement is never evaluated on the same candle as the MSB.
+    MSB structure is frozen at sweep detection time.
     """
 
     def __init__(self, instrument: str, config: StrategyConfig | None = None) -> None:
@@ -59,6 +62,7 @@ class StrategyEngine:
         self._confirmed_swing_lows: list[SwingPoint] = []
         self._state = StrategyState.IDLE
         self._active_sweep: LiquiditySweep | None = None
+        self._active_structure_swing: SwingPoint | None = None
         self._active_msb: MarketStructureBreak | None = None
         self._active_displacement: Displacement | None = None
         self._sweep_m1_index: int | None = None
@@ -82,6 +86,7 @@ class StrategyEngine:
         self._confirmed_swing_lows.clear()
         self._state = StrategyState.IDLE
         self._active_sweep = None
+        self._active_structure_swing = None
         self._active_msb = None
         self._active_displacement = None
         self._sweep_m1_index = None
@@ -133,9 +138,11 @@ class StrategyEngine:
         emitted: list[StrategySignal] = []
 
         if self._state == StrategyState.IDLE:
-            sweep = self._detect_sweep(candle, idx)
-            if sweep is not None:
+            result = self._detect_sweep(candle, idx)
+            if result is not None:
+                sweep, structure = result
                 self._active_sweep = sweep
+                self._active_structure_swing = structure
                 self._sweep_m1_index = idx
                 self._state = StrategyState.SWEEP_DETECTED
 
@@ -152,19 +159,12 @@ class StrategyEngine:
                     self._active_msb = msb
                     self._msb_m1_index = idx
                     self._state = StrategyState.MSB_DETECTED
-                    disp = self._detect_displacement(candle, idx)
-                    if disp is not None:
-                        self._active_displacement = disp
-                        self._state = StrategyState.DISPLACEMENT_DETECTED
-                        fvg = self._detect_fvg(idx)
-                        if fvg is not None:
-                            signal = self._build_signal(fvg, candle)
-                            self._signals.append(signal)
-                            emitted.append(signal)
-                            self._state = StrategyState.SIGNAL
-                            self._expire_setup()
+                    # Displacement is NOT evaluated on the MSB candle.
 
         elif self._state == StrategyState.MSB_DETECTED:
+            assert self._msb_m1_index is not None
+            if idx <= self._msb_m1_index:
+                return emitted
             disp = self._detect_displacement(candle, idx)
             if disp is not None:
                 self._active_displacement = disp
@@ -177,7 +177,6 @@ class StrategyEngine:
                     self._state = StrategyState.SIGNAL
                     self._expire_setup()
             else:
-                assert self._msb_m1_index is not None
                 if idx - self._msb_m1_index > 1:
                     self._expire_setup()
 
@@ -206,6 +205,7 @@ class StrategyEngine:
     def _expire_setup(self) -> None:
         self._state = StrategyState.IDLE
         self._active_sweep = None
+        self._active_structure_swing = None
         self._active_msb = None
         self._active_displacement = None
         self._sweep_m1_index = None
@@ -233,60 +233,69 @@ class StrategyEngine:
             recent_high, recent_low, bias,  # type: ignore[arg-type]
         )
 
-    def _prior_confirmed_swing_low(self, before_epoch: int) -> SwingPoint | None:
+    def _prior_confirmed_swing_low(self, at_or_before_epoch: int) -> SwingPoint | None:
         candidates = [
             s for s in self._confirmed_swing_lows
-            if s.confirmed_at_epoch <= before_epoch and s.candle_end_epoch < before_epoch
+            if s.confirmed_at_epoch <= at_or_before_epoch
+            and s.candle_end_epoch < at_or_before_epoch
         ]
         if not candidates:
             return None
         return max(candidates, key=lambda s: s.candle_start_epoch)
 
-    def _prior_confirmed_swing_high(self, before_epoch: int) -> SwingPoint | None:
+    def _prior_confirmed_swing_high(self, at_or_before_epoch: int) -> SwingPoint | None:
         candidates = [
             s for s in self._confirmed_swing_highs
-            if s.confirmed_at_epoch <= before_epoch and s.candle_end_epoch < before_epoch
+            if s.confirmed_at_epoch <= at_or_before_epoch
+            and s.candle_end_epoch < at_or_before_epoch
         ]
         if not candidates:
             return None
         return max(candidates, key=lambda s: s.candle_start_epoch)
 
-    def _detect_sweep(self, candle: Candle, idx: int) -> LiquiditySweep | None:
+    def _detect_sweep(
+        self, candle: Candle, idx: int
+    ) -> tuple[LiquiditySweep, SwingPoint] | None:
+        """Detect sweep and freeze the MSB structural level at this decision time."""
         decision = candle.end_epoch
         swing_low = self._prior_confirmed_swing_low(decision)
         if swing_low is not None:
             if candle.low < swing_low.price and candle.close > swing_low.price:
-                return LiquiditySweep(
+                structure = self._prior_confirmed_swing_high(decision)
+                if structure is None:
+                    return None
+                sweep = LiquiditySweep(
                     Direction.LONG, swing_low.price,
                     candle.start_epoch, candle.end_epoch,
                     candle.low, candle.high, candle.close, swing_low,
                 )
+                return sweep, structure
         swing_high = self._prior_confirmed_swing_high(decision)
         if swing_high is not None:
             if candle.high > swing_high.price and candle.close < swing_high.price:
-                return LiquiditySweep(
+                structure = self._prior_confirmed_swing_low(decision)
+                if structure is None:
+                    return None
+                sweep = LiquiditySweep(
                     Direction.SHORT, swing_high.price,
                     candle.start_epoch, candle.end_epoch,
                     candle.low, candle.high, candle.close, swing_high,
                 )
+                return sweep, structure
         return None
 
-    def _detect_msb(self, candle: Candle, idx: int, bars_after: int) -> MarketStructureBreak | None:
+    def _detect_msb(
+        self, candle: Candle, idx: int, bars_after: int
+    ) -> MarketStructureBreak | None:
+        """MSB uses only the structure frozen at sweep time."""
         sweep = self._active_sweep
+        structure = self._active_structure_swing
         assert sweep is not None
-        decision = candle.end_epoch
+        if structure is None:
+            return None
+        if structure.confirmed_at_epoch > sweep.sweep_candle_end_epoch:
+            return None
         if sweep.direction == Direction.LONG:
-            structure = self._prior_confirmed_swing_high(sweep.sweep_candle_start_epoch)
-            if structure is None:
-                candidates = [
-                    s for s in self._confirmed_swing_highs
-                    if s.confirmed_at_epoch <= decision
-                    and s.candle_end_epoch <= sweep.sweep_candle_end_epoch
-                    and s.price > sweep.swept_level
-                ]
-                if not candidates:
-                    return None
-                structure = max(candidates, key=lambda s: s.candle_start_epoch)
             if candle.close > structure.price:
                 return MarketStructureBreak(
                     Direction.LONG, structure.price,
@@ -294,17 +303,6 @@ class StrategyEngine:
                     bars_after, structure,
                 )
         else:
-            structure = self._prior_confirmed_swing_low(sweep.sweep_candle_start_epoch)
-            if structure is None:
-                candidates = [
-                    s for s in self._confirmed_swing_lows
-                    if s.confirmed_at_epoch <= decision
-                    and s.candle_end_epoch <= sweep.sweep_candle_end_epoch
-                    and s.price < sweep.swept_level
-                ]
-                if not candidates:
-                    return None
-                structure = max(candidates, key=lambda s: s.candle_start_epoch)
             if candle.close < structure.price:
                 return MarketStructureBreak(
                     Direction.SHORT, structure.price,
