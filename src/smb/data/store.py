@@ -13,13 +13,13 @@ Under ``root``::
 
 Rows: instrument, epoch, price, source_order.
 
-``source_order`` is a monotonically increasing ingestion sequence used so
-dataset-level validation can detect non-monotonic *source* ordering
-(epoch going backward relative to write/ingest order). Query results for
-time ranges remain chronological (ORDER BY epoch).
+``source_order`` is assigned when each tick is **consumed from the input
+iterable/page**, before partition buffering. That preserves true source/
+ingestion order even when consecutive ticks fall into different
+year/month partitions. Dataset-level validation uses
+``LAG(epoch) OVER (ORDER BY source_order)``.
 
-Writes are page/partition-oriented. Callers should prefer ``write_page``
-so a multi-month stream is never held in memory.
+Time-range queries remain chronological (ORDER BY epoch).
 """
 
 from __future__ import annotations
@@ -48,6 +48,9 @@ _SCHEMA = pa.schema(
 
 _STREAM_FLUSH_THRESHOLD = 5_000
 
+# Buffered row: (tick, source_order assigned at input consumption)
+_Buffered = tuple[StoredTick, int]
+
 
 class ParquetTickStore:
     """Durable Parquet dataset for historical ticks."""
@@ -64,8 +67,11 @@ class ParquetTickStore:
         *,
         dedupe: bool = True,
     ) -> int:
-        """Append ticks with bounded per-partition buffers."""
-        buffers: dict[tuple[str, int, int], list[StoredTick]] = {}
+        """Append ticks with bounded per-partition buffers.
+
+        ``source_order`` is assigned on input consumption (not at flush).
+        """
+        buffers: dict[tuple[str, int, int], list[_Buffered]] = {}
         written = 0
 
         def flush_key(key: tuple[str, int, int]) -> int:
@@ -77,10 +83,12 @@ class ParquetTickStore:
         for tick in ticks:
             if not tick.instrument or tick.epoch < 0:
                 continue
+            # Assign source_order at the moment the tick is consumed.
+            order = self._allocate_source_order()
             y, m = _year_month(tick.epoch)
             key = (tick.instrument, y, m)
             buf = buffers.setdefault(key, [])
-            buf.append(tick)
+            buf.append((tick, order))
             if len(buf) >= _STREAM_FLUSH_THRESHOLD:
                 written += flush_key(key)
 
@@ -183,13 +191,13 @@ class ParquetTickStore:
             info["instruments"][instrument] = repo.coverage(instrument)
         return info
 
-    def next_source_order(self, count: int) -> int:
-        """Allocate ``count`` consecutive source_order values; return the first."""
+    def _allocate_source_order(self) -> int:
+        """Next source_order value (assigned at input consumption time)."""
         if self._source_order_counter is None:
             self._source_order_counter = self._max_source_order() + 1
-        start = self._source_order_counter
-        self._source_order_counter += count
-        return start
+        value = self._source_order_counter
+        self._source_order_counter += 1
+        return value
 
     def _max_source_order(self) -> int:
         """Max source_order across the whole dataset (0 if empty)."""
@@ -219,33 +227,38 @@ class ParquetTickStore:
         instrument: str,
         year: int,
         month: int,
-        group: list[StoredTick],
+        group: list[_Buffered],
         *,
         dedupe: bool,
     ) -> int:
         path = self._partition_path(instrument, year, month)
         path.parent.mkdir(parents=True, exist_ok=True)
 
+        # 1) Dedupe within incoming batch (first occurrence wins; keep its order).
         if dedupe:
             seen: set[tuple[int, float]] = set()
-            unique: list[StoredTick] = []
-            for t in group:
-                key = (t.epoch, t.price)
+            unique: list[_Buffered] = []
+            for tick, order in group:
+                key = (tick.epoch, tick.price)
                 if key in seen:
                     continue
                 seen.add(key)
-                unique.append(t)
+                unique.append((tick, order))
             group = unique
 
+        # 2) Dedupe against existing on-disk rows (preserve assigned source_order).
         if dedupe and path.exists():
             existing = self._load_keys(path)
-            group = [t for t in group if (t.epoch, t.price) not in existing]
+            group = [
+                (t, o) for t, o in group if (t.epoch, t.price) not in existing
+            ]
         if not group:
             return 0
 
-        start_order = self.next_source_order(len(group))
-        orders = list(range(start_order, start_order + len(group)))
-        table = _ticks_to_table(group, orders)
+        # Preserve the source_order values assigned at input consumption.
+        ticks = [t for t, _ in group]
+        orders = [o for _, o in group]
+        table = _ticks_to_table(ticks, orders)
 
         if path.exists():
             old = pq.read_table(path)
