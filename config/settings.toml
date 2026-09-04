@@ -28,3 +28,10 @@ msb_window_bars = 3
 displacement_body_range_ratio = 0.60
 displacement_body_atr_ratio = 0.80
 atr_period = 14
+
+# Milestone 2B — trade construction / risk (defaults mirror TradeConfig)
+[trade]
+risk_per_trade = 0.01
+target_rr = 2.0
+minimum_rr = 1.5
+sl_atr_buffer = 0.10
