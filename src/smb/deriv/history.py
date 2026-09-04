@@ -46,7 +46,7 @@ class HistoryPage:
 
     symbol: str
     ticks: tuple[Tick, ...]
-    pip_size: int | None = None
+    pip_size: float | None = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     @property
@@ -55,11 +55,17 @@ class HistoryPage:
 
     @property
     def earliest(self) -> Tick | None:
-        return self.ticks[0] if self.ticks else None
+        """Oldest tick by epoch (independent of source list order)."""
+        if not self.ticks:
+            return None
+        return min(self.ticks, key=lambda t: t.epoch)
 
     @property
     def latest(self) -> Tick | None:
-        return self.ticks[-1] if self.ticks else None
+        """Newest tick by epoch (independent of source list order)."""
+        if not self.ticks:
+            return None
+        return max(self.ticks, key=lambda t: t.epoch)
 
 
 def _epoch_to_utc(epoch: int | float) -> datetime:
@@ -78,6 +84,7 @@ def parse_history_response(
     """
     msg_type = response.get("msg_type")
     if msg_type not in ("history", "candles"):
+        # Still allow history object even if msg_type is odd.
         if "history" not in response:
             raise ValueError(
                 f"Unexpected ticks_history response msg_type={msg_type!r}"
@@ -85,10 +92,11 @@ def parse_history_response(
 
     history = response.get("history")
     if history is None:
+        # Empty history is valid (no ticks in range).
         return HistoryPage(
             symbol=symbol,
             ticks=(),
-            pip_size=_as_int(response.get("pip_size")),
+            pip_size=_as_float(response.get("pip_size")),
             raw=dict(response),
         )
 
@@ -124,9 +132,10 @@ def parse_history_response(
             )
         )
 
-    ticks.sort(key=lambda t: t.epoch)
+    # Preserve source order from Deriv; do not silently re-sort.
+    # Integrity issues are detected by compute_tick_stats().
 
-    pip_size = _as_int(response.get("pip_size"))
+    pip_size = _as_float(response.get("pip_size"))
     return HistoryPage(
         symbol=symbol,
         ticks=tuple(ticks),
@@ -135,11 +144,12 @@ def parse_history_response(
     )
 
 
-def _as_int(value: Any) -> int | None:
+def _as_float(value: Any) -> float | None:
+    """Parse a numeric value as float, preserving decimal precision (e.g. 0.01)."""
     if value is None:
         return None
     try:
-        return int(value)
+        return float(value)
     except (TypeError, ValueError):
         return None
 
@@ -199,8 +209,8 @@ async def fetch_ticks_paginated(
 
     * Each request returns at most 1000 ticks in chronological order.
     * To obtain the previous page, set ``end`` to ``earliest_epoch - 1``.
-    * Adjacent pages do not overlap; the gap is exactly 1 second for
-      1-second synthetic indices.
+    * Adjacent pages do not overlap: if page N earliest epoch is T,
+      page N+1 latest epoch is T - 1 (no missing tick between pages).
 
     Returns pages in reverse-time order (newest page first).
     """
@@ -287,9 +297,11 @@ def compute_tick_stats(ticks: Sequence[Tick]) -> TickStats:
     epochs = [t.epoch for t in ticks]
     prices = [t.price for t in ticks]
 
+    # Duplicates
     unique = set(epochs)
     duplicate_epochs = len(epochs) - len(unique)
 
+    # Non-monotonic consecutive pairs
     non_monotonic = 0
     intervals: list[float] = []
     for i in range(1, len(epochs)):
@@ -308,19 +320,26 @@ def compute_tick_stats(ticks: Sequence[Tick]) -> TickStats:
         else:
             median_interval = sorted_iv[mid]
 
-    duration = float(epochs[-1] - epochs[0]) if len(epochs) > 1 else 0.0
+    # Time span uses min/max epoch so duration stays meaningful even when
+    # source order is non-monotonic; consecutive-pair checks above still
+    # report ordering integrity problems.
+    min_epoch = min(epochs)
+    max_epoch = max(epochs)
+    duration = float(max_epoch - min_epoch) if len(epochs) > 1 else 0.0
     tps = (len(epochs) - 1) / duration if duration > 0 else None
 
+    # Approximate decimal precision from string form of prices
     precision = 0
     for p in prices:
         s = f"{p:.10f}".rstrip("0")
         if "." in s:
             precision = max(precision, len(s.split(".")[1]))
 
+    by_epoch = {t.epoch: t for t in ticks}
     return TickStats(
         count=len(ticks),
-        earliest=ticks[0].timestamp,
-        latest=ticks[-1].timestamp,
+        earliest=by_epoch[min_epoch].timestamp,
+        latest=by_epoch[max_epoch].timestamp,
         duration_seconds=duration if len(epochs) > 1 else None,
         min_interval=min(intervals) if intervals else None,
         max_interval=max(intervals) if intervals else None,
