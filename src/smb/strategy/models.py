@@ -7,7 +7,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Literal
+from types import MappingProxyType
+from typing import Any, Literal, Mapping
 
 
 class Direction(StrEnum):
@@ -160,5 +161,12 @@ class StrategySignal:
     fvg: FairValueGap
     m15_context: M15Context
     # Descriptive reference levels only — not executable entry/SL/TP.
-    reference_levels: dict[str, float] = field(default_factory=dict)
-    metadata: dict[str, object] = field(default_factory=dict)
+    # Stored as MappingProxyType so the signal remains immutable.
+    reference_levels: Mapping[str, float] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "reference_levels", MappingProxyType(dict(self.reference_levels))
+        )
+        object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
