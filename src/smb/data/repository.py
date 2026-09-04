@@ -27,7 +27,10 @@ class TickRepository:
 
         start_epoch <= epoch < end_epoch
 
-    Results are always chronological (ORDER BY epoch, price).
+    Time-range results are chronological (ORDER BY epoch, price).
+
+    Dataset-level non-monotonic detection uses ``source_order`` (ingestion
+    sequence preserved at write time), not sorted epoch order.
     """
 
     def __init__(self, store: ParquetTickStore) -> None:
@@ -53,7 +56,7 @@ class TickRepository:
         start_epoch: int | None = None,
         end_epoch: int | None = None,
     ) -> Iterator[StoredTick]:
-        """Stream matching ticks without loading the full dataset."""
+        """Stream matching ticks (primary application read path)."""
         instrument_dir = self.root / "ticks" / f"instrument={instrument}"
         if not instrument_dir.exists():
             return
@@ -97,8 +100,9 @@ class TickRepository:
     def coverage(self, instrument: str) -> dict[str, Any]:
         """Compute coverage stats via SQL without materialising all ticks.
 
-        Returns keys: tick_count, earliest_epoch, latest_epoch, min_price,
-        max_price, duplicate_count, non_monotonic_count.
+        ``non_monotonic_count`` counts consecutive pairs in **ingestion
+        order** (``source_order``) where epoch decreases. Sorting by epoch
+        before the check is intentionally avoided.
         """
         instrument_dir = self.root / "ticks" / f"instrument={instrument}"
         empty = {
@@ -137,7 +141,7 @@ class TickRepository:
                 """
                 WITH ordered AS (
                     SELECT epoch,
-                           LAG(epoch) OVER (ORDER BY epoch ASC, price ASC) AS prev_epoch
+                           LAG(epoch) OVER (ORDER BY source_order ASC) AS prev_epoch
                     FROM read_parquet(?, hive_partitioning=1, union_by_name=True)
                     WHERE instrument = ?
                 )

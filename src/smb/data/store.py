@@ -11,15 +11,15 @@ Under ``root``::
             month={MM}/
               part-*.parquet
 
-Partitioning by instrument then year/month keeps time-range queries
-efficient for ~15M ticks per instrument without a distributed lake.
+Rows: instrument, epoch, price, source_order.
 
-Each row: instrument (string), epoch (int64), price (float64).
+``source_order`` is a monotonically increasing ingestion sequence used so
+dataset-level validation can detect non-monotonic *source* ordering
+(epoch going backward relative to write/ingest order). Query results for
+time ranges remain chronological (ORDER BY epoch).
 
-Writes are page/partition-oriented: callers should pass one page (or a
-modest batch) at a time so the full multi-month stream is never held in
-memory. Within each write, duplicates are removed both against the
-incoming batch and against existing rows on disk.
+Writes are page/partition-oriented. Callers should prefer ``write_page``
+so a multi-month stream is never held in memory.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
+import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -41,12 +42,10 @@ _SCHEMA = pa.schema(
         ("instrument", pa.string()),
         ("epoch", pa.int64()),
         ("price", pa.float64()),
+        ("source_order", pa.int64()),
     ]
 )
 
-# Soft upper bound on how many ticks we buffer per partition key while
-# streaming an iterable. Prevents unbounded growth if a caller passes a
-# very large generator without page boundaries.
 _STREAM_FLUSH_THRESHOLD = 5_000
 
 
@@ -57,6 +56,7 @@ class ParquetTickStore:
         self.root = Path(root)
         self.ticks_dir = self.root / "ticks"
         self.ticks_dir.mkdir(parents=True, exist_ok=True)
+        self._source_order_counter: int | None = None
 
     def write_ticks(
         self,
@@ -64,17 +64,7 @@ class ParquetTickStore:
         *,
         dedupe: bool = True,
     ) -> int:
-        """Append ticks in streaming fashion.
-
-        Ticks are grouped by (instrument, year, month). When a partition
-        buffer reaches :data:`_STREAM_FLUSH_THRESHOLD` rows, or when the
-        iterable ends, that partition is flushed to disk. This keeps peak
-        memory proportional to one partition batch, not the full dataset.
-
-        Deduplication (when ``dedupe=True``):
-        1. Within the incoming batch (first occurrence wins).
-        2. Against existing rows already on disk for that partition.
-        """
+        """Append ticks with bounded per-partition buffers."""
         buffers: dict[tuple[str, int, int], list[StoredTick]] = {}
         written = 0
 
@@ -104,10 +94,7 @@ class ParquetTickStore:
         *,
         dedupe: bool = True,
     ) -> int:
-        """Write a single page/batch of ticks (preferred ingestion path).
-
-        Deduplicates within the page and against existing partition data.
-        """
+        """Write a single page/batch (preferred ingestion path)."""
         if not ticks:
             return 0
         return self.write_ticks(ticks, dedupe=dedupe)
@@ -119,34 +106,58 @@ class ParquetTickStore:
         start_epoch: int | None = None,
         end_epoch: int | None = None,
     ) -> Iterator[StoredTick]:
-        """Yield ticks for ``instrument`` in chronological order.
+        """Stream ticks via DuckDB (does not materialise whole partitions).
 
         Range semantics (half-open when both bounds set)::
 
             start_epoch <= epoch < end_epoch
+
+        Results are chronological (ORDER BY epoch, price).
+
+        Prefer :class:`~smb.data.repository.TickRepository` for application
+        code; this method is a thin DuckDB-backed store helper.
         """
         instrument_dir = self.ticks_dir / f"instrument={instrument}"
         if not instrument_dir.exists():
             return
 
-        paths = sorted(instrument_dir.rglob("*.parquet"))
-        for path in paths:
-            table = pq.read_table(
-                path,
-                columns=["instrument", "epoch", "price"],
-                schema=_SCHEMA,
-            )
-            epochs = table.column("epoch").to_pylist()
-            prices = table.column("price").to_pylist()
-            instruments = table.column("instrument").to_pylist()
-            rows = list(zip(instruments, epochs, prices, strict=True))
-            rows.sort(key=lambda r: (r[1], r[2]))
-            for inst, epoch, price in rows:
-                if start_epoch is not None and epoch < start_epoch:
-                    continue
-                if end_epoch is not None and epoch >= end_epoch:
-                    continue
-                yield StoredTick(instrument=inst, epoch=int(epoch), price=float(price))
+        pattern = str(instrument_dir / "**" / "*.parquet")
+        clauses = ["instrument = ?"]
+        params: list[object] = [instrument]
+        if start_epoch is not None:
+            clauses.append("epoch >= ?")
+            params.append(start_epoch)
+        if end_epoch is not None:
+            clauses.append("epoch < ?")
+            params.append(end_epoch)
+        where = " AND ".join(clauses)
+
+        sql = f"""
+            SELECT instrument, epoch, price
+            FROM read_parquet(?, hive_partitioning=1, union_by_name=True)
+            WHERE {where}
+            ORDER BY epoch ASC, price ASC
+        """
+        con = duckdb.connect()
+        try:
+            result = con.execute(sql, [pattern, *params])
+            while True:
+                row = result.fetchone()
+                if row is None:
+                    break
+                yield StoredTick(
+                    instrument=str(row[0]),
+                    epoch=int(row[1]),
+                    price=float(row[2]),
+                )
+        except duckdb.Error as exc:
+            from smb.data.repository import StorageError
+
+            raise StorageError(
+                f"Failed to read ticks for instrument={instrument!r}: {exc}"
+            ) from exc
+        finally:
+            con.close()
 
     def list_instruments(self) -> list[str]:
         if not self.ticks_dir.exists():
@@ -164,7 +175,6 @@ class ParquetTickStore:
         return sorted(instrument_dir.rglob("*.parquet"))
 
     def inspect(self) -> dict[str, Any]:
-        """Lightweight coverage summary via DuckDB (no full Python materialisation)."""
         from smb.data.repository import TickRepository
 
         repo = TickRepository(self)
@@ -172,6 +182,37 @@ class ParquetTickStore:
         for instrument in self.list_instruments():
             info["instruments"][instrument] = repo.coverage(instrument)
         return info
+
+    def next_source_order(self, count: int) -> int:
+        """Allocate ``count`` consecutive source_order values; return the first."""
+        if self._source_order_counter is None:
+            self._source_order_counter = self._max_source_order() + 1
+        start = self._source_order_counter
+        self._source_order_counter += count
+        return start
+
+    def _max_source_order(self) -> int:
+        """Max source_order across the whole dataset (0 if empty)."""
+        if not self.ticks_dir.exists():
+            return 0
+        paths = list(self.ticks_dir.rglob("*.parquet"))
+        if not paths:
+            return 0
+        pattern = str(self.ticks_dir / "**" / "*.parquet")
+        con = duckdb.connect()
+        try:
+            row = con.execute(
+                """
+                SELECT COALESCE(MAX(source_order), 0)
+                FROM read_parquet(?, hive_partitioning=1, union_by_name=True)
+                """,
+                [pattern],
+            ).fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+        except duckdb.Error:
+            return 0
+        finally:
+            con.close()
 
     def _write_partition(
         self,
@@ -185,7 +226,6 @@ class ParquetTickStore:
         path = self._partition_path(instrument, year, month)
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        # 1) Dedupe within incoming batch (first occurrence wins).
         if dedupe:
             seen: set[tuple[int, float]] = set()
             unique: list[StoredTick] = []
@@ -197,17 +237,20 @@ class ParquetTickStore:
                 unique.append(t)
             group = unique
 
-        # 2) Dedupe against existing on-disk rows.
         if dedupe and path.exists():
             existing = self._load_keys(path)
             group = [t for t in group if (t.epoch, t.price) not in existing]
         if not group:
             return 0
 
-        table = _ticks_to_table(group)
+        start_order = self.next_source_order(len(group))
+        orders = list(range(start_order, start_order + len(group)))
+        table = _ticks_to_table(group, orders)
+
         if path.exists():
-            old = pq.read_table(path, schema=_SCHEMA)
-            table = pa.concat_tables([old, table])
+            old = pq.read_table(path)
+            old = _ensure_source_order_column(old)
+            table = pa.concat_tables([old.cast(_SCHEMA), table.cast(_SCHEMA)])
         pq.write_table(table, path, compression="zstd")
         logger.debug(
             "Wrote %s ticks to %s",
@@ -239,12 +282,20 @@ def _year_month(epoch: int) -> tuple[int, int]:
     return dt.year, dt.month
 
 
-def _ticks_to_table(ticks: Sequence[StoredTick]) -> pa.Table:
+def _ticks_to_table(ticks: Sequence[StoredTick], orders: Sequence[int]) -> pa.Table:
     return pa.table(
         {
             "instrument": [t.instrument for t in ticks],
             "epoch": [t.epoch for t in ticks],
             "price": [t.price for t in ticks],
+            "source_order": list(orders),
         },
         schema=_SCHEMA,
     )
+
+
+def _ensure_source_order_column(table: pa.Table) -> pa.Table:
+    if "source_order" in table.column_names:
+        return table
+    n = table.num_rows
+    return table.append_column("source_order", pa.array(range(n), type=pa.int64()))
