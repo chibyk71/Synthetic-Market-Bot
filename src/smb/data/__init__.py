@@ -1,5 +1,9 @@
 """Historical dataset storage, query, validation, and ingestion."""
 
+from smb.data.candle_store import (
+    ParquetCandleStore,
+    build_candles_from_ticks,
+)
 from smb.data.models import StoredTick
 from smb.data.repository import StorageError, TickRepository
 from smb.data.stats import DatasetStats, InstrumentStats
@@ -15,4 +19,6 @@ __all__ = [
     "InstrumentStats",
     "ValidationReport",
     "validate_ticks",
+    "ParquetCandleStore",
+    "build_candles_from_ticks",
 ]
