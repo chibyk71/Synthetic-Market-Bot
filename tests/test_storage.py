@@ -264,6 +264,42 @@ async def test_iter_history_pages_stops_on_empty():
         assert collected[0].count == 0
 
 
+def test_coverage_detects_source_order_non_monotonic(store: ParquetTickStore):
+    """Ticks written as 10 → 11 → 9 must report one non-monotonic pair.
+
+    coverage() must use source_order (ingestion sequence), not sorted epoch.
+    """
+    store.write_ticks(
+        [
+            _st("x", 10, 1.0),
+            _st("x", 11, 2.0),
+            _st("x", 9, 3.0),
+        ],
+        dedupe=False,
+    )
+    cov = TickRepository(store).coverage("x")
+    assert cov["tick_count"] == 3
+    assert cov["non_monotonic_count"] == 1
+    epochs = [t.epoch for t in TickRepository(store).get_ticks("x")]
+    assert epochs == [9, 10, 11]
+
+
+def test_store_read_ticks_range_streams(store: ParquetTickStore):
+    """ParquetTickStore.read_ticks uses DuckDB range filter (not full partition sort in Python)."""
+    store.write_ticks(
+        [
+            _st("x", 100, 1.0),
+            _st("x", 200, 2.0),
+            _st("x", 300, 3.0),
+            _st("x", 400, 4.0),
+        ]
+    )
+    got = list(store.read_ticks("x", start_epoch=200, end_epoch=400))
+    assert [t.epoch for t in got] == [200, 300]
+    got2 = TickRepository(store).get_ticks("x", start_epoch=200, end_epoch=400)
+    assert [t.epoch for t in got2] == [200, 300]
+
+
 def test_stored_to_replay_to_candles(store: ParquetTickStore):
     store.write_ticks(
         [
