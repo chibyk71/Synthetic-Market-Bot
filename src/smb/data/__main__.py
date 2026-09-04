@@ -1,9 +1,11 @@
 """Developer CLI: python -m smb.data <command>
 
 Commands:
-  ingest   Fetch historical ticks and write Parquet
-  validate Scan dataset and report integrity
-  stats    Print coverage statistics
+  ingest        Fetch historical ticks and write Parquet
+  validate      Scan tick dataset and report integrity
+  stats         Print tick coverage statistics
+  build-candles Build M1/M5/M15 from stored ticks and persist
+  candle-stats  Print candle dataset coverage
 """
 
 from __future__ import annotations
@@ -158,6 +160,80 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return asyncio.run(_run())
 
 
+def cmd_build_candles(args: argparse.Namespace) -> int:
+    from smb.data.candle_store import ParquetCandleStore, build_candles_from_ticks
+    from smb.data.repository import StorageError, TickRepository
+    from smb.data.store import ParquetTickStore
+    from smb.market.candles import TIMEFRAMES
+
+    settings = _load_settings()
+    root = _data_root(settings)
+    tick_repo = TickRepository(ParquetTickStore(root))
+    candle_store = ParquetCandleStore(root)
+
+    instruments = (
+        [args.instrument] if args.instrument else tick_repo.list_instruments()
+    )
+    if not instruments:
+        print("No tick instruments in dataset.", file=sys.stderr)
+        return 1
+
+    tfs = None
+    if args.timeframe:
+        key = args.timeframe.upper()
+        if key not in TIMEFRAMES:
+            print(f"Unknown timeframe: {args.timeframe}", file=sys.stderr)
+            return 1
+        tfs = [TIMEFRAMES[key]]
+
+    try:
+        for instrument in instruments:
+            counts = build_candles_from_ticks(
+                tick_repo,
+                candle_store,
+                instrument=instrument,
+                timeframes=tfs,
+                start_epoch=args.start,
+                end_epoch=args.end,
+            )
+            parts = ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+            print(f"{instrument}: wrote {parts}")
+    except StorageError as exc:
+        print(f"Storage error: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
+def cmd_candle_stats(args: argparse.Namespace) -> int:
+    from smb.data.candle_store import ParquetCandleStore
+    from smb.data.repository import StorageError
+
+    settings = _load_settings()
+    store = ParquetCandleStore(_data_root(settings))
+    instruments = (
+        [args.instrument] if args.instrument else store.list_instruments()
+    )
+    if not instruments:
+        print("No candle instruments in dataset.")
+        return 0
+    try:
+        for instrument in instruments:
+            tfs = store.list_timeframes(instrument)
+            if args.timeframe:
+                tfs = [args.timeframe.upper()]
+            for tf in tfs:
+                cov = store.coverage(instrument, tf)
+                print(
+                    f"{instrument} {tf}: candles={cov['candle_count']} "
+                    f"start={cov['earliest_start']} end={cov['latest_start']} "
+                    f"low={cov['min_low']} high={cov['max_high']}"
+                )
+    except StorageError as exc:
+        print(f"Storage error: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m smb.data")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -172,8 +248,20 @@ def main(argv: list[str] | None = None) -> int:
     p_val.add_argument("--instrument", help="Limit to one instrument key")
     p_val.set_defaults(func=cmd_validate)
 
-    p_stats = sub.add_parser("stats", help="Print dataset statistics")
+    p_stats = sub.add_parser("stats", help="Print tick dataset statistics")
     p_stats.set_defaults(func=cmd_stats)
+
+    p_bc = sub.add_parser("build-candles", help="Build candles from stored ticks")
+    p_bc.add_argument("--instrument", help="Config key (default: all with ticks)")
+    p_bc.add_argument("--timeframe", help="M1, M5, or M15 (default: all three)")
+    p_bc.add_argument("--start", type=int, default=None, help="start_epoch inclusive")
+    p_bc.add_argument("--end", type=int, default=None, help="end_epoch exclusive")
+    p_bc.set_defaults(func=cmd_build_candles)
+
+    p_cs = sub.add_parser("candle-stats", help="Print candle dataset coverage")
+    p_cs.add_argument("--instrument", help="Limit to one instrument")
+    p_cs.add_argument("--timeframe", help="Limit to one timeframe")
+    p_cs.set_defaults(func=cmd_candle_stats)
 
     args = parser.parse_args(argv)
     return args.func(args)
