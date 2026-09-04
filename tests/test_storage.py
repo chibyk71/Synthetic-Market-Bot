@@ -264,6 +264,58 @@ async def test_iter_history_pages_stops_on_empty():
         assert collected[0].count == 0
 
 
+def test_source_order_preserved_across_month_boundary(store: ParquetTickStore):
+    """source_order follows input order even when ticks span partitions.
+
+    Jan 31 23:59 → Feb 01 00:00 → Jan 31 23:59+1s must keep increasing
+    source_order in input sequence, and coverage must see the backward
+    epoch jump on the third tick.
+    """
+    jan_a = 1580515140
+    feb = 1580515200
+    jan_b = 1580515141
+    assert _year_month_check(jan_a) == (2020, 1)
+    assert _year_month_check(feb) == (2020, 2)
+    assert _year_month_check(jan_b) == (2020, 1)
+
+    store.write_ticks(
+        [
+            _st("x", jan_a, 1.0),
+            _st("x", feb, 2.0),
+            _st("x", jan_b, 3.0),
+        ],
+        dedupe=False,
+    )
+
+    import duckdb
+
+    pattern = str(store.ticks_dir / "instrument=x" / "**" / "*.parquet")
+    con = duckdb.connect()
+    rows = con.execute(
+        """
+        SELECT epoch, source_order
+        FROM read_parquet(?, hive_partitioning=1, union_by_name=True)
+        ORDER BY source_order ASC
+        """,
+        [pattern],
+    ).fetchall()
+    con.close()
+    assert [r[0] for r in rows] == [jan_a, feb, jan_b]
+    assert [r[1] for r in rows] == sorted(r[1] for r in rows)
+    assert rows[0][1] < rows[1][1] < rows[2][1]
+
+    cov = TickRepository(store).coverage("x")
+    assert cov["tick_count"] == 3
+    assert cov["non_monotonic_count"] == 1
+
+
+def _year_month_check(epoch: int) -> tuple[int, int]:
+    from datetime import datetime, timezone
+
+    dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+    return dt.year, dt.month
+
+
 def test_coverage_detects_source_order_non_monotonic(store: ParquetTickStore):
     """Ticks written as 10 → 11 → 9 must report one non-monotonic pair.
 
