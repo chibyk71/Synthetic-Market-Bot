@@ -8,6 +8,7 @@ Research-first automated trading system for **Deriv Synthetic Indices**.
 |-----------|--------|-------|
 | **1A** | Done | Deriv public WebSocket client + `active_symbols` discovery |
 | **1B** | Done | Historical ticks (`ticks_history`) + pagination probe |
+| **1C** | Done | Historical replay + deterministic M1/M5/M15 candles |
 
 No trading strategy, execution, risk engine, simulation, ML, or Telegram
 integration is present.
@@ -86,6 +87,49 @@ Both instruments emit **exactly 1 tick per second** over the sampled window
 These are **extrapolations**, not measured downloads. A full six-month
 archive is intentionally deferred.
 
+## Historical replay & candles (Milestone 1C)
+
+Pipeline:
+
+```
+Historical Ticks
+    ↓
+HistoricalReplay  (source-order, deterministic)
+    ↓
+Normalized Tick Stream (Tick / TickStream)
+    ↓
+CandleBuilder
+    ↓
+M1 / M5 / M15 Candles
+```
+
+### Replay
+
+- `HistoricalReplay` emits ticks **strictly in the supplied source order**.
+- No silent reordering; identical input → identical output.
+- Callback or iterator interface; no wall-clock sleep (tests stay instant).
+- Empty input yields no ticks and no error.
+
+### Candle boundaries
+
+UTC epoch-second buckets, half-open interval `[T, T + N)`:
+
+| Timeframe | Seconds | Bucket start |
+|-----------|---------|--------------|
+| M1 | 60 | `(epoch // 60) * 60` |
+| M5 | 300 | `(epoch // 300) * 300` |
+| M15 | 900 | `(epoch // 900) * 900` |
+
+A tick at exactly `T + N` belongs to the **next** candle.
+
+- OHLC: open = first, high = max, low = min, close = last in the bucket.
+- `tick_count` = number of ticks in the candle (**not** traded volume).
+- **Gaps**: intervals with no ticks produce **no** candles (nothing is fabricated).
+- **Out-of-order**: a tick with epoch < previous epoch raises `OutOfOrderTickError`.
+- Call `flush()` / end of `process()` to finalize the last open candle after historical replay.
+
+`MultiTimeframeCandleBuilder` feeds the same tick stream into M1, M5, and M15 builders.
+
 ## Project layout
 
 ```
@@ -99,6 +143,9 @@ synthetic-market-bot/
 │   ├── client.py      # DerivClient + req_id routing
 │   ├── symbols.py     # SymbolInfo, resolve_symbol
 │   └── history.py     # Tick, fetch_ticks, pagination
+├── src/smb/market/
+│   ├── replay.py      # HistoricalReplay, TickStream
+│   └── candles.py     # CandleBuilder M1/M5/M15
 ├── scripts/
 │   ├── probe_symbols.py
 │   └── probe_history.py
@@ -155,15 +202,18 @@ DerivClient (req_id-routed)
 Historical Tick API (history.py)
     ↓
 Normalized Tick
+    ↓
+HistoricalReplay  ─┐
+                   ├──→ CandleBuilder → M1 / M5 / M15
+Future LiveFeed  ──┘
 ```
 
-Later milestones will add Historical Replay → Candle Builder → Strategy.
-Do not couple history retrieval to strategy logic.
+Do not couple the candle layer to strategy logic.
 
 ## Known limitations (intentionally deferred)
 
 - Reconnection / heartbeat framework
 - Live tick subscriptions
-- Full Market Data interface abstraction
-- Candle builder, strategy, risk, execution, simulation, ML, Telegram
+- Strategy, risk, execution, simulation, ML, Telegram
+- Indicators (EMA, RSI, ATR, …)
 - Bulk multi-month historical archive
