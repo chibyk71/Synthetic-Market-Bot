@@ -1,4 +1,8 @@
-"""Dataset statistics — answer 'what historical data do we have?'."""
+"""Dataset statistics — answer 'what historical data do we have?'.
+
+Uses DuckDB SQL aggregates so ~15M-tick instruments are never loaded into
+Python lists.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +10,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from smb.data.repository import TickRepository
-from smb.data.validation import validate_ticks
 
 
 @dataclass(frozen=True)
@@ -46,22 +49,26 @@ class DatasetStats:
 
 
 def compute_dataset_stats(repo: TickRepository) -> DatasetStats:
-    """Scan each instrument and produce coverage / integrity statistics."""
+    """Per-instrument coverage via SQL; does not materialise all ticks."""
     rows: list[InstrumentStats] = []
     for instrument in repo.list_instruments():
-        ticks = list(repo.iter_ticks(instrument))
-        report = validate_ticks(ticks, expected_instrument=instrument)
+        cov = repo.coverage(instrument)
+        earliest = cov["earliest_epoch"]
+        latest = cov["latest_epoch"]
+        duration = None
+        if earliest is not None and latest is not None and cov["tick_count"] > 1:
+            duration = float(latest - earliest)
         rows.append(
             InstrumentStats(
                 instrument=instrument,
-                tick_count=report.tick_count,
-                earliest_epoch=report.earliest_epoch,
-                latest_epoch=report.latest_epoch,
-                duration_seconds=report.duration_seconds,
-                min_price=report.min_price,
-                max_price=report.max_price,
-                duplicate_count=report.duplicate_count,
-                non_monotonic_count=report.non_monotonic_count,
+                tick_count=cov["tick_count"],
+                earliest_epoch=earliest,
+                latest_epoch=latest,
+                duration_seconds=duration,
+                min_price=cov["min_price"],
+                max_price=cov["max_price"],
+                duplicate_count=cov["duplicate_count"],
+                non_monotonic_count=cov["non_monotonic_count"],
             )
         )
     return DatasetStats(instruments=tuple(rows))
