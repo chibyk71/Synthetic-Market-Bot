@@ -1,0 +1,18 @@
+# Semantic instrument configuration.
+# Runtime resolves these names against Deriv active_symbols; never hard-code
+# symbol IDs (e.g. 1HZ75V) as authoritative.
+
+[instruments.volatility_75_1s]
+name = "Volatility 75 (1s) Index"
+
+[instruments.step_index]
+# Official active_symbols currently lists Step Index variants as
+# "Step Index 100", "Step Index 200", etc. Use the exact display name
+# that should be resolved at runtime.
+name = "Step Index 100"
+
+[deriv]
+# Public market-data WebSocket (no authentication required).
+# Verified against https://developers.deriv.com/llms/active-symbols.md
+websocket_url = "wss://api.derivws.com/trading/v1/options/ws/public"
+request_timeout_seconds = 15.0
