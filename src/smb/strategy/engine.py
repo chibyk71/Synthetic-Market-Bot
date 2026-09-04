@@ -49,6 +49,7 @@ class StrategyEngine:
 
     Displacement is never evaluated on the same candle as the MSB.
     MSB structure is frozen at sweep detection time.
+    Swings used for sweep/structure must be confirmed on an earlier candle.
     """
 
     def __init__(self, instrument: str, config: StrategyConfig | None = None) -> None:
@@ -159,7 +160,6 @@ class StrategyEngine:
                     self._active_msb = msb
                     self._msb_m1_index = idx
                     self._state = StrategyState.MSB_DETECTED
-                    # Displacement is NOT evaluated on the MSB candle.
 
         elif self._state == StrategyState.MSB_DETECTED:
             assert self._msb_m1_index is not None
@@ -233,21 +233,28 @@ class StrategyEngine:
             recent_high, recent_low, bias,  # type: ignore[arg-type]
         )
 
-    def _prior_confirmed_swing_low(self, at_or_before_epoch: int) -> SwingPoint | None:
+    def _prior_confirmed_swing_low(self, before_epoch: int) -> SwingPoint | None:
+        """Most recent swing low confirmed *strictly before* ``before_epoch``.
+
+        A swing whose right-side confirmation completes on the current candle
+        (``confirmed_at_epoch == before_epoch``) is not available for sweep or
+        structure selection on that same candle.
+        """
         candidates = [
             s for s in self._confirmed_swing_lows
-            if s.confirmed_at_epoch <= at_or_before_epoch
-            and s.candle_end_epoch < at_or_before_epoch
+            if s.confirmed_at_epoch < before_epoch
+            and s.candle_end_epoch < before_epoch
         ]
         if not candidates:
             return None
         return max(candidates, key=lambda s: s.candle_start_epoch)
 
-    def _prior_confirmed_swing_high(self, at_or_before_epoch: int) -> SwingPoint | None:
+    def _prior_confirmed_swing_high(self, before_epoch: int) -> SwingPoint | None:
+        """Most recent swing high confirmed *strictly before* ``before_epoch``."""
         candidates = [
             s for s in self._confirmed_swing_highs
-            if s.confirmed_at_epoch <= at_or_before_epoch
-            and s.candle_end_epoch < at_or_before_epoch
+            if s.confirmed_at_epoch < before_epoch
+            and s.candle_end_epoch < before_epoch
         ]
         if not candidates:
             return None
@@ -256,7 +263,7 @@ class StrategyEngine:
     def _detect_sweep(
         self, candle: Candle, idx: int
     ) -> tuple[LiquiditySweep, SwingPoint] | None:
-        """Detect sweep and freeze the MSB structural level at this decision time."""
+        """Detect sweep and freeze MSB structure at this decision time."""
         decision = candle.end_epoch
         swing_low = self._prior_confirmed_swing_low(decision)
         if swing_low is not None:
@@ -287,13 +294,12 @@ class StrategyEngine:
     def _detect_msb(
         self, candle: Candle, idx: int, bars_after: int
     ) -> MarketStructureBreak | None:
-        """MSB uses only the structure frozen at sweep time."""
         sweep = self._active_sweep
         structure = self._active_structure_swing
         assert sweep is not None
         if structure is None:
             return None
-        if structure.confirmed_at_epoch > sweep.sweep_candle_end_epoch:
+        if structure.confirmed_at_epoch >= sweep.sweep_candle_end_epoch:
             return None
         if sweep.direction == Direction.LONG:
             if candle.close > structure.price:
