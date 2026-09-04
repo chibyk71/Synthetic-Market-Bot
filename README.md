@@ -10,6 +10,7 @@ Research-first automated trading system for **Deriv Synthetic Indices**.
 | **1B** | Done | Historical ticks (`ticks_history`) + pagination probe |
 | **1C** | Done | Historical replay + deterministic M1/M5/M15 candles |
 | **1D** | Done | Parquet dataset + DuckDB query + ingestion/validation |
+| **1E** | Done | Historical candle dataset (build/persist/query M1/M5/M15) |
 
 No trading strategy, execution, risk engine, simulation, ML, or Telegram
 integration is present.
@@ -21,49 +22,39 @@ integration is present.
 | `volatility_75_1s`    | Volatility 75 (1s) Index         |
 | `step_index`          | Step Index 100                   |
 
+## Historical candles (Milestone 1E)
+
+Build deterministic M1/M5/M15 candles from the stored tick dataset and
+persist them for efficient research queries without replaying all ticks:
+
+```
+TickRepository → HistoricalReplay → MultiTimeframeCandleBuilder
+        ↓
+Parquet candles → DuckDB range query
+```
+
+```bash
+python -m smb.data build-candles
+python -m smb.data candle-stats
+```
+
+Layout:
+
+```
+data/candles/
+  instrument={key}/
+    timeframe={M1|M5|M15}/
+      year={YYYY}/month={MM}/part-000.parquet
+```
+
+Same OHLC boundary semantics as Milestone 1C. Rebuilds replace candles
+with matching `start_epoch` (deterministic, no duplicates).
+
 ## Historical storage (Milestone 1D)
 
 ```
-Deriv ticks_history
-        ↓
-Incremental ingestion
-        ↓
-Parquet dataset (source of truth)
-        ↓
-DuckDB query layer
-        ↓
-HistoricalReplay → M1/M5/M15 candles
+Deriv ticks_history → incremental ingestion → Parquet ticks → DuckDB
 ```
-
-### Layout
-
-```
-data/ticks/
-  instrument={key}/
-    year={YYYY}/
-      month={MM}/
-        part-000.parquet
-```
-
-Partitioning by instrument → year → month keeps ~15M-tick, multi-instrument
-time-range queries efficient on a local machine without a data lake.
-
-Rows: `instrument` (string), `epoch` (int64), `price` (float64).
-
-### Duplicate policy
-
-Identity: `(instrument, epoch, price)`. Re-ingesting the same range with
-`dedupe=True` writes **zero** additional rows (deterministic).
-
-### Query semantics
-
-```python
-repo.get_ticks(instrument, start_epoch=..., end_epoch=...)
-# half-open: start_epoch <= epoch < end_epoch
-# chronological ORDER BY epoch, price
-```
-
-### Developer CLI
 
 ```bash
 python -m smb.data ingest --pages 3
@@ -71,22 +62,20 @@ python -m smb.data validate
 python -m smb.data stats
 ```
 
-Large datasets live under `data/` and are **gitignored** — download once,
-validate, query repeatedly without hitting Deriv.
+Large datasets under `data/` are **gitignored**.
 
 ## Historical replay & candles (Milestone 1C)
 
-Pipeline: HistoricalReplay (source-order) → CandleBuilder → M1/M5/M15.
-
-UTC half-open buckets `[T, T+N)`. Gaps produce no candles. Out-of-order
-ticks raise `OutOfOrderTickError`. `tick_count` is not traded volume.
+`HistoricalReplay` → `CandleBuilder` → M1/M5/M15. Half-open UTC buckets
+`[T, T+N)`. Gaps produce no candles. Out-of-order ticks raise
+`OutOfOrderTickError`. `tick_count` is not traded volume.
 
 ## Project layout
 
 ```
 src/smb/deriv/     # client, symbols, history
 src/smb/market/    # replay, candles
-src/smb/data/      # store, repository, ingest, validation
+src/smb/data/      # tick store, candle store, ingest, validation
 ```
 
 ## Setup
@@ -99,7 +88,7 @@ pytest
 ## Architecture boundary
 
 ```
-Deriv API → history → Parquet + DuckDB → HistoricalReplay → CandleBuilder
+Deriv → ticks Parquet → candles Parquet → HistoricalReplay / candle queries
 ```
 
 Strategy must never import `duckdb`, `pyarrow`, or `DerivClient` directly.
@@ -107,4 +96,4 @@ Strategy must never import `duckdb`, `pyarrow`, or `DerivClient` directly.
 ## Known limitations
 
 - No live subscriptions, strategy, indicators, risk, execution, ML, Telegram
-- Six-month bulk download is incremental by design; not committed to Git
+- Six-month bulk download is incremental; not committed to Git
