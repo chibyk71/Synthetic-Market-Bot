@@ -12,6 +12,11 @@ Layout::
 
 Candles are built from stored ticks via the existing CandleBuilder and
 persisted for efficient range queries without replaying all ticks.
+
+Only **complete** timeframe buckets are written. Build ranges are aligned
+to timeframe boundaries; partial edge candles are not persisted.
+Rebuilds clear the entire affected ``[range_start, range_end)`` so stale
+candles cannot survive when the underlying tick coverage shrinks.
 """
 
 from __future__ import annotations
@@ -59,6 +64,57 @@ DEFAULT_TIMEFRAMES: tuple[Timeframe, ...] = (
 )
 
 
+def align_build_range(
+    timeframe: Timeframe,
+    start_epoch: int | None,
+    end_epoch: int | None,
+) -> tuple[int | None, int | None]:
+    """Align a build window to complete timeframe buckets.
+
+    * ``start_epoch`` is rounded **up** to the next bucket start (ceil).
+    * ``end_epoch`` is rounded **down** to a bucket start (floor), which is
+      also the exclusive end of the previous complete bucket.
+
+    Raises ``ValueError`` if the aligned window is empty (no complete
+    bucket fits between the bounds).
+    """
+    n = timeframe.seconds
+    aligned_start = start_epoch
+    aligned_end = end_epoch
+
+    if start_epoch is not None:
+        aligned_start = ((start_epoch + n - 1) // n) * n
+
+    if end_epoch is not None:
+        aligned_end = (end_epoch // n) * n
+
+    if (
+        aligned_start is not None
+        and aligned_end is not None
+        and aligned_start >= aligned_end
+    ):
+        raise ValueError(
+            f"No complete {timeframe.name} bucket in range "
+            f"[{start_epoch}, {end_epoch}); "
+            f"aligned [{aligned_start}, {aligned_end})"
+        )
+    return aligned_start, aligned_end
+
+
+def is_complete_candle(candle: Candle, timeframe: Timeframe) -> bool:
+    """Return True if the candle spans a full timeframe bucket.
+
+    Uses the candle's own start/end epochs (must equal one bucket) and
+    requires ``tick_count == timeframe.seconds`` for these 1-tick/s
+    synthetic indices so edge partials are not treated as canonical.
+    """
+    if candle.end_epoch - candle.start_epoch != timeframe.seconds:
+        return False
+    if candle.start_epoch % timeframe.seconds != 0:
+        return False
+    return candle.tick_count == timeframe.seconds
+
+
 class ParquetCandleStore:
     """Durable Parquet dataset for OHLC candles."""
 
@@ -72,25 +128,45 @@ class ParquetCandleStore:
         instrument: str,
         candles: Sequence[Candle],
         *,
-        replace_range: bool = True,
+        clear_start: int | None = None,
+        clear_end: int | None = None,
     ) -> int:
         """Persist candles for one instrument.
 
-        When ``replace_range`` is True, existing rows whose start_epoch falls
-        in the written set's span for the same timeframe are removed first
-        so rebuilds are deterministic and free of duplicates.
+        When ``clear_start`` / ``clear_end`` are provided, **all** existing
+        candles for the same instrument+timeframe with
+        ``clear_start <= start_epoch < clear_end`` are removed before
+        writing. This replaces the entire affected range so vanished
+        candles cannot remain as stale rows.
+
+        If clear bounds are omitted and ``candles`` is non-empty, the clear
+        range defaults to ``[min(start_epoch), max(end_epoch))`` of the
+        incoming set (full span of new candles).
         """
-        if not candles:
+        if not candles and clear_start is None and clear_end is None:
             return 0
 
         by_tf: dict[str, list[Candle]] = {}
         for c in candles:
             by_tf.setdefault(c.timeframe, []).append(c)
 
+        if not by_tf and (clear_start is not None or clear_end is not None):
+            for tf_name in self.list_timeframes(instrument):
+                by_tf.setdefault(tf_name, [])
+
         written = 0
         for timeframe, group in by_tf.items():
+            cs = clear_start
+            ce = clear_end
+            if cs is None and ce is None and group:
+                cs = min(c.start_epoch for c in group)
+                ce = max(c.end_epoch for c in group)
             written += self._write_timeframe(
-                instrument, timeframe, group, replace_range=replace_range
+                instrument,
+                timeframe,
+                group,
+                clear_start=cs,
+                clear_end=ce,
             )
         return written
 
@@ -100,45 +176,66 @@ class ParquetCandleStore:
         timeframe: str,
         candles: Sequence[Candle],
         *,
-        replace_range: bool,
+        clear_start: int | None,
+        clear_end: int | None,
     ) -> int:
-        buckets: dict[tuple[int, int], list[Candle]] = {}
+        paths = self._partition_paths(instrument, timeframe)
+        affected_years_months: set[tuple[int, int]] = set()
+
+        if clear_start is not None or clear_end is not None:
+            for path in paths:
+                affected_years_months.add(_path_year_month(path))
+
         for c in candles:
-            y, m = _year_month(c.start_epoch)
-            buckets.setdefault((y, m), []).append(c)
+            affected_years_months.add(_year_month(c.start_epoch))
 
-        total = 0
-        for (year, month), group in buckets.items():
+        new_by_ym: dict[tuple[int, int], list[Candle]] = {}
+        for c in candles:
+            ym = _year_month(c.start_epoch)
+            new_by_ym.setdefault(ym, []).append(c)
+
+        total_new = 0
+        all_ym = set(new_by_ym) | affected_years_months
+
+        for year, month in sorted(all_ym):
             path = self._partition_path(instrument, timeframe, year, month)
-            path.parent.mkdir(parents=True, exist_ok=True)
-
-            starts = {c.start_epoch for c in group}
-            table = _candles_to_table(instrument, group)
-
+            existing: list[Candle] = []
             if path.exists():
-                old = pq.read_table(path, schema=_SCHEMA)
-                if replace_range:
-                    mask = [
-                        int(ep) not in starts
-                        for ep in old.column("start_epoch").to_pylist()
-                    ]
-                    if any(mask):
-                        keep_idx = [i for i, keep in enumerate(mask) if keep]
-                        old = old.take(keep_idx)
-                        table = pa.concat_tables([old, table])
-                else:
-                    table = pa.concat_tables([old, table])
+                existing = list(_read_partition_candles(path))
 
+            if clear_start is not None or clear_end is not None:
+                existing = [
+                    c
+                    for c in existing
+                    if not _in_clear_range(c.start_epoch, clear_start, clear_end)
+                ]
+
+            incoming = new_by_ym.get((year, month), [])
+            if incoming:
+                starts = {c.start_epoch for c in incoming}
+                existing = [c for c in existing if c.start_epoch not in starts]
+
+            merged = existing + list(incoming)
+            if not merged:
+                if path.exists():
+                    path.unlink()
+                continue
+
+            path.parent.mkdir(parents=True, exist_ok=True)
+            table = _candles_to_table(instrument, merged)
             table = table.sort_by("start_epoch")
             pq.write_table(table, path, compression="zstd")
-            total += len(group)
+            total_new += len(incoming)
             logger.debug(
-                "Wrote %s %s candles to %s",
-                len(group),
+                "Wrote partition %s %s %04d-%02d (%s new, %s kept)",
+                instrument,
                 timeframe,
-                path.relative_to(self.root),
+                year,
+                month,
+                len(incoming),
+                len(existing),
             )
-        return total
+        return total_new
 
     def iter_candles(
         self,
@@ -298,6 +395,16 @@ class ParquetCandleStore:
             / "part-000.parquet"
         )
 
+    def _partition_paths(self, instrument: str, timeframe: str) -> list[Path]:
+        tf_dir = (
+            self.candles_dir
+            / f"instrument={instrument}"
+            / f"timeframe={timeframe}"
+        )
+        if not tf_dir.exists():
+            return []
+        return sorted(tf_dir.rglob("*.parquet"))
+
 
 def build_candles_from_ticks(
     tick_repo: TickRepository,
@@ -308,26 +415,70 @@ def build_candles_from_ticks(
     start_epoch: int | None = None,
     end_epoch: int | None = None,
 ) -> dict[str, int]:
-    """Build candles from stored ticks and persist them.
+    """Build complete candles from stored ticks and persist them.
 
-    Uses HistoricalReplay + MultiTimeframeCandleBuilder so results match
-    the in-memory 1C path. Streams ticks from DuckDB; materialises only
-    the candle result sets (far smaller than tick volume).
-
-    Returns ``{timeframe_name: candles_written}``.
+    Uses HistoricalReplay + MultiTimeframeCandleBuilder so OHLC matches
+    the in-memory 1C path. Only **complete** timeframe buckets are
+    written; build bounds are aligned per timeframe. The entire aligned
+    range is cleared before write so rebuilds cannot leave stale candles.
     """
     tfs = list(timeframes) if timeframes is not None else list(DEFAULT_TIMEFRAMES)
+
+    fetch_start = start_epoch
+    fetch_end = end_epoch
+    aligned_per_tf: dict[str, tuple[int | None, int | None]] = {}
+
+    for tf in tfs:
+        try:
+            a_start, a_end = align_build_range(tf, start_epoch, end_epoch)
+        except ValueError:
+            aligned_per_tf[tf.name] = (None, None)
+            continue
+        aligned_per_tf[tf.name] = (a_start, a_end)
+        if a_start is not None:
+            fetch_start = (
+                a_start if fetch_start is None else min(fetch_start, a_start)
+            )
+        if a_end is not None:
+            fetch_end = a_end if fetch_end is None else max(fetch_end, a_end)
+
     tick_stream = tick_repo.as_tick_stream(
-        instrument, start_epoch=start_epoch, end_epoch=end_epoch
+        instrument, start_epoch=fetch_start, end_epoch=fetch_end
     )
     replay = HistoricalReplay(tick_stream)
     mt = MultiTimeframeCandleBuilder(tfs)
     results = mt.process(replay)
 
     counts: dict[str, int] = {}
-    for name, candles in results.items():
-        n = candle_store.write_candles(instrument, candles, replace_range=True)
-        counts[name] = n
+    for tf in tfs:
+        a_start, a_end = aligned_per_tf.get(tf.name, (start_epoch, end_epoch))
+        if a_start is None and a_end is None and start_epoch is not None:
+            counts[tf.name] = 0
+            continue
+
+        raw = results.get(tf.name, [])
+        complete = [
+            c
+            for c in raw
+            if is_complete_candle(c, tf)
+            and (a_start is None or c.start_epoch >= a_start)
+            and (a_end is None or c.end_epoch <= a_end)
+        ]
+
+        clear_start = a_start
+        clear_end = a_end
+        if clear_start is None and complete:
+            clear_start = min(c.start_epoch for c in complete)
+        if clear_end is None and complete:
+            clear_end = max(c.end_epoch for c in complete)
+
+        n = candle_store.write_candles(
+            instrument,
+            complete,
+            clear_start=clear_start,
+            clear_end=clear_end,
+        )
+        counts[tf.name] = n
     return counts
 
 
@@ -336,6 +487,39 @@ def _year_month(epoch: int) -> tuple[int, int]:
 
     dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
     return dt.year, dt.month
+
+
+def _path_year_month(path: Path) -> tuple[int, int]:
+    month = int(path.parent.name.split("=", 1)[1])
+    year = int(path.parent.parent.name.split("=", 1)[1])
+    return year, month
+
+
+def _in_clear_range(
+    start_epoch: int, clear_start: int | None, clear_end: int | None
+) -> bool:
+    if clear_start is not None and start_epoch < clear_start:
+        return False
+    if clear_end is not None and start_epoch >= clear_end:
+        return False
+    return clear_start is not None or clear_end is not None
+
+
+def _read_partition_candles(path: Path) -> Iterator[Candle]:
+    table = pq.read_table(path, schema=_SCHEMA)
+    cols = {name: table.column(name).to_pylist() for name in table.column_names}
+    for i in range(table.num_rows):
+        yield Candle(
+            timeframe=str(cols["timeframe"][i]),
+            start_epoch=int(cols["start_epoch"][i]),
+            end_epoch=int(cols["end_epoch"][i]),
+            open=float(cols["open"][i]),
+            high=float(cols["high"][i]),
+            low=float(cols["low"][i]),
+            close=float(cols["close"][i]),
+            tick_count=int(cols["tick_count"][i]),
+            finalized=True,
+        )
 
 
 def _candles_to_table(instrument: str, candles: Sequence[Candle]) -> pa.Table:
