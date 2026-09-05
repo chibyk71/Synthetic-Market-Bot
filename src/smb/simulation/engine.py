@@ -82,8 +82,6 @@ class SimulationEngine:
         filled = False
         entry_time: int | None = None
         fill_price: float | None = None
-        # Last eligible tick epoch observed (for TIMEOUT exit_time)
-        last_eligible_epoch: int | None = None
 
         for tick in ticks:
             epoch = tick.epoch
@@ -98,8 +96,6 @@ class SimulationEngine:
 
             if not _is_finite_price(price):
                 raise ValueError(f"tick price must be finite (epoch={epoch})")
-
-            last_eligible_epoch = epoch
 
             if not filled:
                 if self._entry_touched(direction, price, entry_price):
@@ -161,21 +157,22 @@ class SimulationEngine:
                 duration_seconds=None,
             )
 
-        # Filled but neither TP nor SL within horizon
+        # Filled but neither TP nor SL within horizon.
+        # TIMEOUT always reports the configured horizon, not the last supplied
+        # tick. Callers are expected to provide a stream covering the full
+        # bounded window; truncated streams still timeout at horizon_end so
+        # results stay comparable across datasets.
         assert entry_time is not None and fill_price is not None
-        timeout_epoch = (
-            last_eligible_epoch if last_eligible_epoch is not None else horizon_end
-        )
         return self._result(
             candidate,
             outcome=SimulationOutcome.TIMEOUT,
             filled=True,
             entry_time=entry_time,
             entry_price=fill_price,
-            exit_time=timeout_epoch,
+            exit_time=horizon_end,
             exit_price=None,  # no exit price on pure timeout
             exit_reason=ExitReason.TIMEOUT,
-            duration_seconds=timeout_epoch - entry_time,
+            duration_seconds=horizon_end - entry_time,
         )
 
     @staticmethod
