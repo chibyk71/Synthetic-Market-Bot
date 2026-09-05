@@ -8,6 +8,7 @@ No fills, execution, P&L, or simulation — those belong to Milestone 2C.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -28,11 +29,20 @@ class RejectionReason(StrEnum):
     INVALID_ATR = "invalid_atr"
 
 
+def _require_finite(value: float, name: str) -> None:
+    """Reject NaN and ±inf for configuration / risk inputs."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(f"{name} must be a real number")
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be finite")
+
+
 @dataclass(frozen=True, slots=True)
 class TradeConfig:
     """Immutable research parameters for trade construction.
 
     Defaults match the initial Milestone 2B research definition.
+    All numeric parameters must be finite (no NaN / ±inf).
     """
 
     risk_per_trade: float = 0.01
@@ -41,6 +51,10 @@ class TradeConfig:
     sl_atr_buffer: float = 0.10
 
     def __post_init__(self) -> None:
+        _require_finite(self.risk_per_trade, "risk_per_trade")
+        _require_finite(self.target_rr, "target_rr")
+        _require_finite(self.minimum_rr, "minimum_rr")
+        _require_finite(self.sl_atr_buffer, "sl_atr_buffer")
         if not (0.0 < self.risk_per_trade < 1.0):
             raise ValueError("risk_per_trade must be in (0, 1)")
         if self.target_rr <= 0.0:
@@ -58,12 +72,7 @@ class RiskContext:
     equity: float
 
     def __post_init__(self) -> None:
-        if not isinstance(self.equity, (int, float)):
-            raise ValueError("equity must be a number")
-        if self.equity != self.equity:  # NaN
-            raise ValueError("equity must be finite")
-        if self.equity == float("inf") or self.equity == float("-inf"):
-            raise ValueError("equity must be finite")
+        _require_finite(self.equity, "equity")
         if self.equity <= 0.0:
             raise ValueError("equity must be > 0")
 
