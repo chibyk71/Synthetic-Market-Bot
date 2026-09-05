@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import math
 
 import pytest
 
@@ -22,11 +23,6 @@ from smb.trade import (
     TradeConfig,
     TradeConstructor,
 )
-
-
-# ---------------------------------------------------------------------------
-# Signal fixtures with independent expected geometry
-# ---------------------------------------------------------------------------
 
 
 def _make_signal(
@@ -127,20 +123,7 @@ def _make_signal(
     )
 
 
-# ---------------------------------------------------------------------------
-# LONG construction — explicit independent expected values
-# ---------------------------------------------------------------------------
-
-
 def test_long_construction_geometry():
-    """LONG: entry = FVG mid, SL below sweep, TP above entry, RR = target."""
-    # Independent numbers (not derived via constructor helpers):
-    #   gap_low=115, gap_high=117 → entry = 116
-    #   swept=100, atr=5, buffer=0.10 → SL = 100 - 0.5 = 99.5
-    #   risk_distance = 116 - 99.5 = 16.5
-    #   target_rr=2 → reward = 33 → TP = 116 + 33 = 149
-    #   equity=10_000, risk%=0.01 → risk_amount=100
-    #   position_size = 100 / 16.5
     signal = _make_signal(
         direction=Direction.LONG,
         swept_level=100.0,
@@ -165,25 +148,19 @@ def test_long_construction_geometry():
     assert trade.instrument == "vol75"
     assert trade.direction == Direction.LONG
     assert trade.signal_epoch == signal.signal_epoch
-
     assert trade.entry_zone_low == 115.0
     assert trade.entry_zone_high == 117.0
     assert trade.entry_price == 116.0
-
     assert trade.stop_loss == 99.5
     assert trade.stop_loss < trade.entry_price
-
     assert trade.take_profit == 149.0
     assert trade.take_profit > trade.entry_price
-
     assert trade.risk_distance == 16.5
     assert trade.reward_distance == 33.0
     assert trade.risk_reward == 2.0
-
     assert trade.risk_percent == 0.01
     assert trade.risk_amount == 100.0
     assert trade.position_size == pytest.approx(100.0 / 16.5)
-
     assert trade.source_signal is signal
 
 
@@ -207,13 +184,7 @@ def test_long_zero_buffer():
     assert result.trade.position_size == pytest.approx(50.0 / 11.0)
 
 
-# ---------------------------------------------------------------------------
-# SHORT construction
-# ---------------------------------------------------------------------------
-
-
 def test_short_construction_geometry():
-    """SHORT: entry = FVG mid, SL above sweep, TP below entry."""
     signal = _make_signal(
         direction=Direction.SHORT,
         swept_level=100.0,
@@ -228,32 +199,22 @@ def test_short_construction_geometry():
         sl_atr_buffer=0.10,
     )
     result = TradeConstructor(cfg).construct(signal, RiskContext(equity=10_000.0))
-
     assert result.accepted is True
     trade = result.trade
     assert trade is not None
-
     assert trade.direction == Direction.SHORT
     assert trade.entry_zone_low == 83.0
     assert trade.entry_zone_high == 85.0
     assert trade.entry_price == 84.0
-
     assert trade.stop_loss == 100.5
     assert trade.stop_loss > trade.entry_price
-
     assert trade.take_profit == 51.0
     assert trade.take_profit < trade.entry_price
-
     assert trade.risk_distance == 16.5
     assert trade.reward_distance == 33.0
     assert trade.risk_reward == 2.0
     assert trade.risk_amount == 100.0
     assert trade.position_size == pytest.approx(100.0 / 16.5)
-
-
-# ---------------------------------------------------------------------------
-# Rejection cases
-# ---------------------------------------------------------------------------
 
 
 def test_reject_invalid_fvg_geometry():
@@ -324,7 +285,6 @@ def test_reject_insufficient_rr():
 
 
 def test_reject_minimum_rr_boundary_accepted():
-    """RR exactly at minimum_rr must be accepted."""
     signal = _make_signal(
         direction=Direction.LONG,
         swept_level=100.0,
@@ -391,23 +351,16 @@ def test_large_and_small_equity():
     )
     cfg = TradeConfig(risk_per_trade=0.01, target_rr=2.0, minimum_rr=1.5)
     ctor = TradeConstructor(cfg)
-
     big = ctor.construct(signal, RiskContext(equity=1_000_000.0))
     assert big.accepted is True
     assert big.trade is not None
     assert big.trade.risk_amount == 10_000.0
     assert big.trade.position_size == pytest.approx(10_000.0 / 16.5)
-
     small = ctor.construct(signal, RiskContext(equity=100.0))
     assert small.accepted is True
     assert small.trade is not None
     assert small.trade.risk_amount == 1.0
     assert small.trade.position_size == pytest.approx(1.0 / 16.5)
-
-
-# ---------------------------------------------------------------------------
-# Determinism
-# ---------------------------------------------------------------------------
 
 
 def test_determinism_identical_inputs():
@@ -421,7 +374,6 @@ def test_determinism_identical_inputs():
     cfg = TradeConfig()
     risk = RiskContext(equity=10_000.0)
     ctor = TradeConstructor(cfg)
-
     r1 = ctor.construct(signal, risk)
     r2 = ctor.construct(signal, risk)
     assert r1.accepted is True and r2.accepted is True
@@ -443,10 +395,7 @@ def test_determinism_new_constructor_instances():
     )
     cfg = TradeConfig(target_rr=2.5, minimum_rr=1.5, risk_per_trade=0.02)
     risk = RiskContext(equity=25_000.0)
-
-    results = [
-        TradeConstructor(cfg).construct(signal, risk) for _ in range(5)
-    ]
+    results = [TradeConstructor(cfg).construct(signal, risk) for _ in range(5)]
     assert all(r.accepted for r in results)
     ref = results[0].trade
     assert ref is not None
@@ -459,23 +408,11 @@ def test_determinism_new_constructor_instances():
         assert t.position_size == ref.position_size
 
 
-# ---------------------------------------------------------------------------
-# Causality — no market-data dependency
-# ---------------------------------------------------------------------------
-
-
 def test_construct_signature_has_no_market_data():
     sig = inspect.signature(TradeConstructor.construct)
     param_names = set(sig.parameters) - {"self"}
     assert param_names == {"signal", "risk_context"}
-    for forbidden in (
-        "market",
-        "candles",
-        "data",
-        "provider",
-        "history",
-        "client",
-    ):
+    for forbidden in ("market", "candles", "data", "provider", "history", "client"):
         assert not any(forbidden in n for n in param_names)
 
 
@@ -492,11 +429,6 @@ def test_constructor_source_has_no_market_imports():
         "CandleStore",
     ):
         assert banned not in source
-
-
-# ---------------------------------------------------------------------------
-# Immutability of accepted trade
-# ---------------------------------------------------------------------------
 
 
 def test_accepted_trade_immutable():
@@ -517,3 +449,117 @@ def test_accepted_trade_immutable():
         trade.position_size = 1.0  # type: ignore[misc]
     with pytest.raises(AttributeError):
         result.accepted = False  # type: ignore[misc]
+
+
+def _assert_candidate_all_finite(trade) -> None:
+    numeric_fields = (
+        "entry_price",
+        "entry_zone_low",
+        "entry_zone_high",
+        "stop_loss",
+        "take_profit",
+        "risk_distance",
+        "reward_distance",
+        "risk_reward",
+        "risk_percent",
+        "risk_amount",
+        "position_size",
+    )
+    for name in numeric_fields:
+        value = getattr(trade, name)
+        assert math.isfinite(value), f"{name}={value!r} is not finite"
+
+
+def test_accepted_candidate_all_numeric_fields_are_finite():
+    signal = _make_signal(
+        direction=Direction.LONG,
+        swept_level=100.0,
+        gap_low=115.0,
+        gap_high=117.0,
+        atr=5.0,
+    )
+    result = TradeConstructor().construct(signal, RiskContext(equity=10_000.0))
+    assert result.accepted is True
+    assert result.trade is not None
+    _assert_candidate_all_finite(result.trade)
+
+
+def test_reject_nan_atr():
+    signal = _make_signal(
+        direction=Direction.LONG,
+        swept_level=100.0,
+        gap_low=115.0,
+        gap_high=117.0,
+        atr=float("nan"),
+    )
+    result = TradeConstructor().construct(signal, RiskContext(equity=10_000.0))
+    assert result.accepted is False
+    assert result.rejection_reason == RejectionReason.INVALID_ATR
+
+
+def test_reject_inf_atr():
+    signal = _make_signal(
+        direction=Direction.LONG,
+        swept_level=100.0,
+        gap_low=115.0,
+        gap_high=117.0,
+        atr=float("inf"),
+    )
+    result = TradeConstructor().construct(signal, RiskContext(equity=10_000.0))
+    assert result.accepted is False
+    assert result.rejection_reason == RejectionReason.INVALID_ATR
+
+
+def test_reject_nan_swept_level():
+    signal = _make_signal(
+        direction=Direction.LONG,
+        swept_level=float("nan"),
+        gap_low=115.0,
+        gap_high=117.0,
+        atr=5.0,
+    )
+    result = TradeConstructor().construct(signal, RiskContext(equity=10_000.0))
+    assert result.accepted is False
+    assert result.rejection_reason == RejectionReason.INVALID_STOP
+
+
+def test_reject_nan_fvg_bounds():
+    signal = _make_signal(
+        direction=Direction.LONG,
+        swept_level=100.0,
+        gap_low=float("nan"),
+        gap_high=117.0,
+        atr=5.0,
+    )
+    result = TradeConstructor().construct(signal, RiskContext(equity=10_000.0))
+    assert result.accepted is False
+    assert result.rejection_reason == RejectionReason.INVALID_FVG
+
+
+def test_reject_inf_fvg_bounds():
+    signal = _make_signal(
+        direction=Direction.LONG,
+        swept_level=100.0,
+        gap_low=115.0,
+        gap_high=float("inf"),
+        atr=5.0,
+    )
+    result = TradeConstructor().construct(signal, RiskContext(equity=10_000.0))
+    assert result.accepted is False
+    assert result.rejection_reason == RejectionReason.INVALID_FVG
+
+
+def test_reject_inf_position_size_cannot_be_accepted():
+    """Accepted candidate never carries non-finite position_size."""
+    signal = _make_signal(
+        direction=Direction.LONG,
+        swept_level=100.0,
+        gap_low=115.0,
+        gap_high=117.0,
+        atr=5.0,
+    )
+    result = TradeConstructor().construct(signal, RiskContext(equity=10_000.0))
+    assert result.accepted is True
+    assert result.trade is not None
+    assert math.isfinite(result.trade.position_size)
+    assert result.trade.position_size > 0.0
