@@ -281,3 +281,37 @@ def test_construction_result_immutable():
 def test_rejection_reason_values():
     assert RejectionReason.INVALID_FVG.value == "invalid_fvg"
     assert RejectionReason.INSUFFICIENT_RR.value == "insufficient_rr"
+
+
+# ---------------------------------------------------------------------------
+# Finite-number invariant for TradeConfig
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "field,bad",
+    [
+        ("risk_per_trade", float("nan")),
+        ("risk_per_trade", float("inf")),
+        ("risk_per_trade", float("-inf")),
+        ("target_rr", float("nan")),
+        ("target_rr", float("inf")),
+        ("target_rr", float("-inf")),
+        ("minimum_rr", float("nan")),
+        ("minimum_rr", float("inf")),
+        ("minimum_rr", float("-inf")),
+        ("sl_atr_buffer", float("nan")),
+        ("sl_atr_buffer", float("inf")),
+        ("sl_atr_buffer", float("-inf")),
+    ],
+)
+def test_trade_config_rejects_non_finite(field: str, bad: float):
+    kwargs = {
+        "risk_per_trade": 0.01,
+        "target_rr": 2.0,
+        "minimum_rr": 1.5,
+        "sl_atr_buffer": 0.10,
+    }
+    kwargs[field] = bad
+    with pytest.raises(ValueError, match=field):
+        TradeConfig(**kwargs)
