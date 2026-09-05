@@ -288,10 +288,10 @@ def test_long_timeout():
         take_profit=110.0,
     )
     ticks = [
-        _tick(1001, 100.0),
+        _tick(1001, 100.0),  # fill
         _tick(1002, 101.0),
         _tick(1005, 102.0),
-        _tick(1010, 103.0),
+        _tick(1010, 103.0),  # still inside, no TP/SL
     ]
     result = _engine(max_duration_seconds=15).simulate(c, ticks)
     assert result.outcome == SimulationOutcome.TIMEOUT
@@ -299,9 +299,9 @@ def test_long_timeout():
     assert result.entry_time == 1001
     assert result.entry_price == 100.0
     assert result.exit_reason == ExitReason.TIMEOUT
-    assert result.exit_time == 1010
+    assert result.exit_time == 1015  # horizon_end, not last tick
     assert result.exit_price is None
-    assert result.duration_seconds == 9
+    assert result.duration_seconds == 14
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +382,7 @@ def test_short_timeout():
     assert result.outcome == SimulationOutcome.TIMEOUT
     assert result.filled is True
     assert result.exit_reason == ExitReason.TIMEOUT
-    assert result.exit_time == 1010
+    assert result.exit_time == 1015  # horizon_end, not last tick
 
 
 # ---------------------------------------------------------------------------
@@ -515,14 +515,14 @@ def test_post_horizon_tick_excluded():
         stop_loss=95.0,
     )
     ticks = [
-        _tick(1001, 100.0),
+        _tick(1001, 100.0),  # fill
         _tick(1005, 102.0),
-        _tick(1016, 110.0),
+        _tick(1016, 110.0),  # after horizon (15s) — must not count as TP
     ]
     result = _engine(max_duration_seconds=15).simulate(c, ticks)
     assert result.outcome == SimulationOutcome.TIMEOUT
     assert result.exit_reason == ExitReason.TIMEOUT
-    assert result.exit_time == 1005
+    assert result.exit_time == 1015  # horizon_end, not last in-horizon tick
 
 
 def test_tick_exactly_at_horizon_is_eligible():
@@ -608,8 +608,8 @@ def test_single_eligible_tick_fill_only():
     assert result.outcome == SimulationOutcome.TIMEOUT
     assert result.filled is True
     assert result.entry_time == 1001
-    assert result.exit_time == 1001
-    assert result.duration_seconds == 0
+    assert result.exit_time == 1900  # signal 1000 + default 900
+    assert result.duration_seconds == 899
 
 
 def test_no_ticks_after_signal():
@@ -626,8 +626,10 @@ def test_extremely_short_horizon():
         _tick(1002, 110.0),
     ]
     result = _engine(max_duration_seconds=1).simulate(c, ticks)
+    # 1002 is beyond horizon (1000+1=1001); TIMEOUT at horizon_end
     assert result.outcome == SimulationOutcome.TIMEOUT
     assert result.exit_time == 1001
+    assert result.duration_seconds == 0
 
 
 # ---------------------------------------------------------------------------
@@ -701,19 +703,41 @@ def test_fill_price_is_candidate_entry_not_tick():
 
 
 def test_processes_in_source_order_not_sorted():
-    """Engine must not silently sort; if source order is weird, follow it."""
+    """Engine must not silently sort; if source order is weird, follow it.
+    Causality still filters by epoch, but among eligible ticks order is source.
+    """
     c = _candidate(
         direction=Direction.LONG,
         entry_price=100.0,
         take_profit=110.0,
         stop_loss=95.0,
     )
+    # Out-of-order source: later epoch first, then earlier eligible
     ticks = [
-        _tick(1005, 110.0),
-        _tick(1002, 100.0),
+        _tick(1005, 110.0),  # would be TP if already filled
+        _tick(1002, 100.0),  # fill
         _tick(1003, 101.0),
     ]
+    # Following source order: see 1005 first → fill? 110 <= 100? No.
+    # Then 1002 → fill. Then 1003 → no exit. TIMEOUT (no TP after fill in order)
     result = _engine(max_duration_seconds=20).simulate(c, ticks)
     assert result.filled is True
     assert result.entry_time == 1002
+    # TP tick was before fill in source order, so never applied
     assert result.outcome == SimulationOutcome.TIMEOUT
+    assert result.exit_time == 1020
+
+
+def test_timeout_uses_horizon_not_last_tick():
+    """TIMEOUT reports horizon_end even when the supplied stream ends early."""
+    c = _candidate(direction=Direction.LONG, entry_price=100.0)
+    ticks = [
+        _tick(1001, 100.0),  # fill
+        _tick(1005, 101.0),  # stream ends early
+    ]
+    result = _engine(max_duration_seconds=15).simulate(c, ticks)
+    assert result.outcome == SimulationOutcome.TIMEOUT
+    assert result.exit_time == 1015
+    assert result.duration_seconds == 14
+    assert result.exit_price is None
+    assert result.exit_reason == ExitReason.TIMEOUT
