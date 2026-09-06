@@ -244,6 +244,41 @@ def test_invalid_config_rejected():
         generate_folds(ds, config)
 
 
+def test_step_size_less_than_test_size_rejected():
+    """Overlapping test windows are invalid at config time."""
+    with pytest.raises(ValueError, match="step_size"):
+        WalkForwardConfig(
+            initial_train_size=20,
+            test_size=10,
+            step_size=5,
+        )
+
+
+def test_step_size_equal_test_size_accepted():
+    cfg = WalkForwardConfig(initial_train_size=20, test_size=10, step_size=10)
+    assert cfg.step_size == 10
+    cfg2 = WalkForwardConfig(initial_train_size=20, test_size=10)
+    assert cfg2.step_size == 10
+
+
+def test_fold_model_uses_fixed_3b_hyperparameters():
+    """3C must not expose tunable RF hyperparameters."""
+    from smb.ml.trainer import (
+        DEFAULT_MAX_DEPTH,
+        DEFAULT_N_ESTIMATORS,
+        DEFAULT_RANDOM_SEED,
+    )
+    from smb.ml.walk_forward import WalkForwardConfig as WFC
+
+    fields = getattr(WFC, "__dataclass_fields__", {})
+    assert "random_seed" not in fields
+    assert "n_estimators" not in fields
+    assert "max_depth" not in fields
+    assert DEFAULT_RANDOM_SEED == 42
+    assert DEFAULT_N_ESTIMATORS == 50
+    assert DEFAULT_MAX_DEPTH == 6
+
+
 def test_test_identities_unique_across_folds():
     ds = _labeled_dataset(40)
     config = WalkForwardConfig(initial_train_size=16, test_size=4, step_size=4)
