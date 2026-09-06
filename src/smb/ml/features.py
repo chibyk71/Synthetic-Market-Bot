@@ -13,24 +13,27 @@ from datetime import UTC, datetime
 from smb.ml.models import DEFAULT_FEATURE_SCHEMA, FEATURE_NAMES, FeatureSchema
 from smb.strategy.models import Direction, StrategySignal
 
-# Deterministic instrument one-hot slots (extend only by appending in later versions)
+# Canonical instrument keys for the two supported research instruments.
+# Match on Deriv underlying_symbol IDs and official display names only
+# (see config/settings.toml and tests/test_symbols.py). Keys are stored
+# lower-cased; comparison uses the same normalization (case-fold + strip).
 _INSTRUMENT_V75_KEYS = frozenset(
     {
-        "R_75",
-        "1HZ75V",
-        "Volatility 75 Index",
-        "Volatility 75 (1s) Index",
-        "synthetic_index",
+        "1hz75v",  # Deriv underlying_symbol for Volatility 75 (1s)
+        "volatility 75 (1s) index",  # official display name
     }
 )
 _INSTRUMENT_STEP100_KEYS = frozenset(
     {
-        "STPRNG",
-        "Step Index 100",
-        "step_index",
-        "STEP",
+        "stprng",  # Deriv underlying_symbol for Step Index 100
+        "step index 100",  # official display name
     }
 )
+
+
+def _normalize_instrument_key(instrument: str) -> str:
+    """Case-fold and strip for deterministic instrument matching."""
+    return instrument.strip().casefold()
 
 
 def _finite_or_zero(value: float | None) -> float:
@@ -50,22 +53,19 @@ def _encode_direction(direction: Direction) -> float:
 
 
 def _instrument_flags(instrument: str) -> tuple[float, float]:
-    """Return (v75_flag, step100_flag). Unknown instruments → (0, 0)."""
-    key = instrument.strip()
-    # Also match common substrings used in tests / Deriv symbols
-    lower = key.lower()
-    v75 = 0.0
-    step = 0.0
-    if key in _INSTRUMENT_V75_KEYS or "75" in lower and "vol" in lower:
-        v75 = 1.0
-    elif "r_75" in lower or "1hz75" in lower:
-        v75 = 1.0
-    if key in _INSTRUMENT_STEP100_KEYS or "step" in lower:
-        step = 1.0
-    # Prefer explicit V75 over step if both somehow match
-    if v75 and step:
-        step = 0.0
-    return v75, step
+    """Return (v75_flag, step100_flag). Unknown instruments → (0, 0).
+
+    Only exact matches against the canonical Deriv IDs and display names
+    are accepted. No substring / fuzzy classification.
+    """
+    key = _normalize_instrument_key(instrument)
+    if not key:
+        return 0.0, 0.0
+    if key in _INSTRUMENT_V75_KEYS:
+        return 1.0, 0.0
+    if key in _INSTRUMENT_STEP100_KEYS:
+        return 0.0, 1.0
+    return 0.0, 0.0
 
 
 def _sweep_depth(signal: StrategySignal) -> float:

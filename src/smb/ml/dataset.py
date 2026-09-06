@@ -27,6 +27,9 @@ def resolve_target(
 
     Returns ``None`` when the row should be excluded from supervised training
     (e.g. NO_FILL under ``FILLED_TP_POSITIVE``).
+
+    Callers must ensure ``outcome`` is consistent with ``filled`` via
+    :func:`_assert_outcome_fill_consistency` before labeling.
     """
     if policy is TargetPolicy.FILLED_TP_POSITIVE:
         if outcome is SimulationOutcome.NO_FILL:
@@ -41,6 +44,33 @@ def resolve_target(
             return 1
         return 0
     raise ValueError(f"unknown policy: {policy}")
+
+
+def _assert_outcome_fill_consistency(simulation: TradeSimulationResult) -> None:
+    """Reject impossible outcome/filled combinations before labeling.
+
+    Mirrors :class:`~smb.simulation.models.TradeSimulationResult` domain rules
+    without modifying the simulation engine: NO_FILL requires filled=False;
+    TP / SL / TIMEOUT require filled=True. NO_FILL must never become target=1.
+    """
+    outcome = simulation.outcome
+    filled = simulation.filled
+    if outcome is SimulationOutcome.NO_FILL:
+        if filled:
+            raise ValueError("NO_FILL simulation must have filled=False")
+        return
+    if outcome in (
+        SimulationOutcome.TP,
+        SimulationOutcome.SL,
+        SimulationOutcome.TIMEOUT,
+    ):
+        if not filled:
+            raise ValueError(
+                f"{outcome} simulation must have filled=True "
+                "(inconsistent outcome/fill state)"
+            )
+        return
+    raise ValueError(f"unhandled simulation outcome: {outcome}")
 
 
 def _identity_key(
@@ -61,7 +91,12 @@ def build_observation(
     Features are taken from ``simulation.candidate.source_signal`` (or an
     explicit ``signal`` override for tests). MAE/MFE from ``metrics`` are
     stored as audit fields only — never as features.
+
+    Raises:
+        ValueError: on identity mismatch or inconsistent outcome/fill state.
     """
+    _assert_outcome_fill_consistency(simulation)
+
     src = signal if signal is not None else simulation.candidate.source_signal
     if src.signal_epoch != simulation.signal_epoch:
         raise ValueError("signal_epoch mismatch between signal and simulation")

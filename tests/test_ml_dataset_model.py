@@ -48,7 +48,7 @@ from smb.trade.models import TradeCandidate
 def _make_signal(
     *,
     direction: Direction = Direction.LONG,
-    instrument: str = "R_75",
+    instrument: str = "1HZ75V",
     signal_epoch: int = 1_700_000_000,
     swept_level: float = 100.0,
     sweep_low: float = 98.0,
@@ -312,10 +312,34 @@ def test_hour_of_day_deterministic():
     assert f[FEATURE_NAMES.index("hour_of_day")] == 22.0
 
 
-def test_instrument_encoding():
-    v75 = extract_features(_make_signal(instrument="R_75"))
-    step = extract_features(_make_signal(instrument="Step Index 100"))
+def test_instrument_encoding_canonical_ids():
+    """Canonical Deriv IDs and display names; unknowns stay (0, 0)."""
+    from smb.ml.features import _instrument_flags
+
+    assert _instrument_flags("1HZ75V") == (1.0, 0.0)
+    assert _instrument_flags("1hz75v") == (1.0, 0.0)  # case normalization
+    assert _instrument_flags(" 1HZ75V ") == (1.0, 0.0)
+    assert _instrument_flags("Volatility 75 (1s) Index") == (1.0, 0.0)
+    assert _instrument_flags("volatility 75 (1s) index") == (1.0, 0.0)
+
+    assert _instrument_flags("stpRNG") == (0.0, 1.0)
+    assert _instrument_flags("STPRNG") == (0.0, 1.0)  # case normalization
+    assert _instrument_flags("Step Index 100") == (0.0, 1.0)
+    assert _instrument_flags("step index 100") == (0.0, 1.0)
+
+    # Unknown / generic must not silently classify as V75 or Step
+    assert _instrument_flags("synthetic_index") == (0.0, 0.0)
+    assert _instrument_flags("R_75") == (0.0, 0.0)
+    assert _instrument_flags("Volatility 75 Index") == (0.0, 0.0)  # not the 1s variant
+    assert _instrument_flags("Step Index 200") == (0.0, 0.0)
+    assert _instrument_flags("unknown") == (0.0, 0.0)
+    assert _instrument_flags("") == (0.0, 0.0)
+
+    v75 = extract_features(_make_signal(instrument="1HZ75V"))
+    step = extract_features(_make_signal(instrument="stpRNG"))
     assert v75[FEATURE_NAMES.index("instrument_v75")] == 1.0
+    assert v75[FEATURE_NAMES.index("instrument_step100")] == 0.0
+    assert step[FEATURE_NAMES.index("instrument_v75")] == 0.0
     assert step[FEATURE_NAMES.index("instrument_step100")] == 1.0
 
 
@@ -394,7 +418,7 @@ def test_observation_preserves_outcome():
 
 def test_build_dataset_ordering_and_counts():
     sigs = [
-        _make_signal(signal_epoch=100 + i * 10, instrument="R_75")
+        _make_signal(signal_epoch=100 + i * 10, instrument="1HZ75V")
         for i in range(5)
     ]
     # reverse input order
@@ -488,7 +512,7 @@ def _balanced_dataset(n: int = 40) -> object:
             body_atr_ratio=0.8 + (i % 4) * 0.05,
             fvg_size=0.5 + (i % 7) * 0.1,
             bars_after_sweep=1 + (i % 3),
-            instrument="R_75" if i % 2 == 0 else "Step Index 100",
+            instrument="1HZ75V" if i % 2 == 0 else "stpRNG",
         )
         sims.append(_make_sim(sig, outcome))
     return build_dataset(sims)
@@ -547,7 +571,7 @@ def test_ml_observation_rejects_bad_target():
     feats = extract_features(sig)
     with pytest.raises(ValueError):
         MLObservation(
-            instrument="R_75",
+            instrument="1HZ75V",
             signal_epoch=1,
             direction=Direction.LONG,
             features=feats,
@@ -555,6 +579,98 @@ def test_ml_observation_rejects_bad_target():
             outcome=SimulationOutcome.TP,
             filled=True,
         )
+
+
+# ---------------------------------------------------------------------------
+# Outcome / fill consistency at dataset boundary
+# ---------------------------------------------------------------------------
+
+
+def test_valid_outcome_fill_combinations():
+    sig = _make_signal()
+    for outcome in (
+        SimulationOutcome.TP,
+        SimulationOutcome.SL,
+        SimulationOutcome.TIMEOUT,
+    ):
+        obs = build_observation(_make_sim(sig, outcome))
+        assert obs.filled is True
+        assert obs.outcome is outcome
+        if outcome is SimulationOutcome.TP:
+            assert obs.target == 1
+        else:
+            assert obs.target == 0
+
+    nf = build_observation(_make_sim(sig, SimulationOutcome.NO_FILL))
+    assert nf.filled is False
+    assert nf.outcome is SimulationOutcome.NO_FILL
+    assert nf.target is None  # default FILLED_TP_POSITIVE policy
+
+
+def test_inconsistent_tp_sl_timeout_unfilled_raise():
+    """TP/SL/TIMEOUT with filled=False must not produce a supervised label.
+
+    Domain model rejects these at construction; the ML boundary also rejects
+    any inconsistent object that reaches it.
+    """
+    from unittest.mock import MagicMock
+
+    from smb.ml.dataset import _assert_outcome_fill_consistency
+
+    sig = _make_signal()
+    candidate = _make_candidate(sig)
+
+    # Domain model: constructing TP/SL/TIMEOUT with filled=False raises
+    for outcome in (
+        SimulationOutcome.TP,
+        SimulationOutcome.SL,
+        SimulationOutcome.TIMEOUT,
+    ):
+        with pytest.raises(ValueError):
+            TradeSimulationResult(
+                instrument=sig.instrument,
+                direction=sig.direction,
+                signal_epoch=sig.signal_epoch,
+                outcome=outcome,
+                filled=False,
+                entry_time=None,
+                entry_price=None,
+                exit_time=None,
+                exit_price=None,
+                exit_reason=ExitReason.NONE,
+                duration_seconds=None,
+                candidate=candidate,
+            )
+
+    # ML boundary: same inconsistent states raise if they reach the builder
+    for outcome in (
+        SimulationOutcome.TP,
+        SimulationOutcome.SL,
+        SimulationOutcome.TIMEOUT,
+    ):
+        mock = MagicMock()
+        mock.outcome = outcome
+        mock.filled = False
+        with pytest.raises(ValueError, match="filled=True"):
+            _assert_outcome_fill_consistency(mock)
+
+    mock_nf = MagicMock()
+    mock_nf.outcome = SimulationOutcome.NO_FILL
+    mock_nf.filled = True
+    with pytest.raises(ValueError, match="filled=False"):
+        _assert_outcome_fill_consistency(mock_nf)
+
+    # Consistent pairs pass at the ML boundary
+    for outcome, filled in (
+        (SimulationOutcome.TP, True),
+        (SimulationOutcome.SL, True),
+        (SimulationOutcome.TIMEOUT, True),
+        (SimulationOutcome.NO_FILL, False),
+    ):
+        mock = MagicMock()
+        mock.outcome = outcome
+        mock.filled = filled
+        _assert_outcome_fill_consistency(mock)  # no raise
 
 
 def test_feature_vector_all_finite():
