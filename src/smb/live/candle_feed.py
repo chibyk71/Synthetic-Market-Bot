@@ -21,7 +21,8 @@ class LiveCandleTracker:
         self._low: float | None = None
         self._close: float | None = None
         self._tick_count: int = 0
-        self._finalized_starts: set[int] = set()
+        # Only the most recent finalized bucket — O(1) memory.
+        self._last_finalized_start: int | None = None
 
     @property
     def timeframe(self) -> Timeframe:
@@ -56,9 +57,10 @@ class LiveCandleTracker:
                 )
             )
             return events
-        if self._bucket_start not in self._finalized_starts:
+        # New bucket → finalize previous at most once (O(1) bookkeeping).
+        if self._bucket_start != self._last_finalized_start:
             finalized = self._snapshot(finalized=True)
-            self._finalized_starts.add(self._bucket_start)
+            self._last_finalized_start = self._bucket_start
             events.append(
                 CandleEvent(
                     kind=CandleEventKind.FINALIZED,
