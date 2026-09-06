@@ -374,7 +374,6 @@ async def test_shutdown_uses_server_subscription_id():
 
 
 def test_candle_tracker_state_remains_bounded():
-    """Long-running streams must not accumulate unbounded finalize tracking state."""
     tr = LiveCandleTracker(TIMEFRAME_M1, instrument="I")
     start = 1_700_000_000 // 60 * 60
     n_minutes = 5_000
@@ -388,3 +387,52 @@ def test_candle_tracker_state_remains_bounded():
     assert isinstance(tr._last_finalized_start, int)
     more = tr.on_tick(LiveTick("I", "S", 99.0, start + (n_minutes - 1) * 60 + 30))
     assert sum(1 for e in more if e.kind is CandleEventKind.FINALIZED) == 0
+
+
+@pytest.mark.asyncio
+async def test_reconnect_resumes_live_stream():
+    """close() sentinel must not poison the post-reconnect message stream."""
+    transport = FakeTickTransport()
+    info = make_fake_symbol("X", "1HZ75V")
+    svc = LiveMarketDataService(
+        "X",
+        transport=transport,
+        symbol_resolver=lambda _n: info,
+        max_reconnect_attempts=3,
+    )
+    await svc.start()
+    assert transport.subscription_id("1HZ75V") == "srv-sub-1"
+
+    await transport.push(_tick_msg("1HZ75V", 10.0, 1000))
+    first: list[LiveTick] = []
+
+    async def take_one(bucket: list) -> None:
+        async for item in svc.events():
+            if isinstance(item, LiveTick):
+                bucket.append(item)
+                break
+
+    await asyncio.wait_for(take_one(first), timeout=2.0)
+    assert first[0].price == 10.0
+
+    # Simulate underlying stream death (reader exit / disconnect).
+    await transport.push(None)
+
+    deadline = asyncio.get_event_loop().time() + 5.0
+    while asyncio.get_event_loop().time() < deadline:
+        if transport.subscription_id("1HZ75V") == "srv-sub-2":
+            break
+        await asyncio.sleep(0.05)
+    else:
+        raise AssertionError("did not obtain fresh subscription after reconnect")
+
+    assert transport.connect_calls >= 2
+    assert "srv-sub-1" in transport.forget_ids
+
+    await transport.push(_tick_msg("1HZ75V", 20.0, 2000))
+    second: list[LiveTick] = []
+    await asyncio.wait_for(take_one(second), timeout=3.0)
+    assert second[0].price == 20.0
+    assert second[0].epoch == 2000
+
+    await svc.stop()
