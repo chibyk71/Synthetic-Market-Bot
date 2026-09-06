@@ -1,21 +1,18 @@
 """Typed models for Milestone 4A live market data.
 
-No raw Deriv protocol objects are exposed beyond optional ``raw`` audit fields.
+Live ticks are genuinely immutable — no nested mutable containers.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
 
 from smb.market.candles import Candle
 
 
 class ConnectionState(StrEnum):
-    """Lifecycle of the live transport."""
-
     DISCONNECTED = "disconnected"
     CONNECTING = "connecting"
     CONNECTED = "connected"
@@ -24,21 +21,18 @@ class ConnectionState(StrEnum):
 
 
 class CandleEventKind(StrEnum):
-    """Whether a candle snapshot is still open or permanently closed."""
-
     UPDATE = "update"
     FINALIZED = "finalized"
 
 
 @dataclass(frozen=True, slots=True)
 class LiveTick:
-    """Normalized live tick for one instrument."""
+    """Normalized live tick for one instrument (genuinely immutable)."""
 
     instrument: str
     symbol: str
     price: float
     epoch: int
-    raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.instrument:
@@ -67,14 +61,11 @@ class LiveTick:
             timestamp=self.timestamp,
             price=float(self.price),
             epoch=self.epoch,
-            raw=dict(self.raw),
         )
 
 
 @dataclass(frozen=True, slots=True)
 class CandleEvent:
-    """Candle snapshot with explicit update vs finalized semantics."""
-
     kind: CandleEventKind
     instrument: str
     candle: Candle
@@ -88,8 +79,6 @@ class CandleEvent:
 
 @dataclass(frozen=True, slots=True)
 class StreamStatus:
-    """Observable health of a live instrument stream (for 4C, not a full gate)."""
-
     connection: ConnectionState
     instrument: str | None
     symbol: str | None
