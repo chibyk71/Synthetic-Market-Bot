@@ -371,3 +371,20 @@ async def test_shutdown_uses_server_subscription_id():
     assert sid_before == "srv-sub-1"
     await svc.stop()
     assert "srv-sub-1" in transport.forget_ids
+
+
+def test_candle_tracker_state_remains_bounded():
+    """Long-running streams must not accumulate unbounded finalize tracking state."""
+    tr = LiveCandleTracker(TIMEFRAME_M1, instrument="I")
+    start = 1_700_000_000 // 60 * 60
+    n_minutes = 5_000
+    finalized_count = 0
+    for m in range(n_minutes):
+        events = tr.on_tick(LiveTick("I", "S", float(m), start + m * 60))
+        finalized_count += sum(1 for e in events if e.kind is CandleEventKind.FINALIZED)
+    assert finalized_count == n_minutes - 1
+    assert not hasattr(tr, "_finalized_starts")
+    assert tr._last_finalized_start is not None
+    assert isinstance(tr._last_finalized_start, int)
+    more = tr.on_tick(LiveTick("I", "S", 99.0, start + (n_minutes - 1) * 60 + 30))
+    assert sum(1 for e in more if e.kind is CandleEventKind.FINALIZED) == 0
