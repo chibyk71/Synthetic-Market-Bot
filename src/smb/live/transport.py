@@ -85,7 +85,7 @@ class DerivTickTransport:
             try:
                 await self._ws.close()
             except Exception:
-                logger.debug("ws close error", exp_info=True)
+                logger.debug("ws close error", exc_info=True)
             finally:
                 self._ws = None
         self._subscriptions.clear()
@@ -134,7 +134,7 @@ class DerivTickTransport:
                 await self._ws.send(json.dumps(payload))
                 logger.info("Forgot subscription %s for %s", sub_id, symbol)
             except Exception:
-                logger.debug("forget send failed", exc_info=True)
+                logger.debug("forget send failed", exp_info=True)
 
     async def messages(self) -> AsyncIterator[dict[str, Any]]:
         while True:
