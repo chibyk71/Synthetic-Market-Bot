@@ -3,6 +3,9 @@
 ``subscribe(symbol)`` waits for the server acknowledgement and stores the
 **server-provided** ``subscription.id``. ``unsubscribe`` / ``forget`` uses
 that ID — never the client ``req_id``.
+
+Inbound queues are generation-scoped: ``connect()`` installs a fresh queue so a
+``None`` sentinel from a prior ``close()`` cannot terminate the new stream.
 """
 
 from __future__ import annotations
@@ -62,6 +65,9 @@ class DerivTickTransport:
     async def connect(self) -> None:
         if self._ws is not None:
             return
+        # Fresh inbound queue so a prior close() sentinel cannot terminate the
+        # new connection's message stream.
+        self._inbound = asyncio.Queue()
         self._ws = await websockets.connect(self._url, open_timeout=self._timeout)
         self._reader_task = asyncio.create_task(
             self._reader_loop(), name="deriv-tick-reader"
@@ -93,6 +99,8 @@ class DerivTickTransport:
             if not fut.done():
                 fut.set_exception(ConnectionError("transport closed"))
         self._pending_subs.clear()
+        # End the *current* generation only. connect() installs a fresh queue so
+        # this sentinel cannot poison a subsequent reconnection stream.
         await self._inbound.put(None)
 
     async def subscribe(self, symbol: str) -> None:
@@ -137,9 +145,18 @@ class DerivTickTransport:
                 logger.debug("forget send failed", exc_info=True)
 
     async def messages(self) -> AsyncIterator[dict[str, Any]]:
+        """Yield inbound messages until the *current* connection generation ends.
+
+        A ``None`` sentinel only terminates the stream if it still belongs to the
+        active inbound queue. After reconnect, ``connect()`` installs a new queue
+        so a stale sentinel from a previous ``close()`` is ignored.
+        """
         while True:
-            item = await self._inbound.get()
+            q = self._inbound
+            item = await q.get()
             if item is None:
+                if q is not self._inbound:
+                    continue
                 return
             yield item
 
@@ -229,6 +246,8 @@ class FakeTickTransport:
         self.connect_calls += 1
         if self._fail_connect:
             raise ConnectionError("simulated connect failure")
+        # Fresh queue per connection generation (mirrors DerivTickTransport).
+        self._queue = asyncio.Queue()
         self._connected = True
 
     async def close(self) -> None:
@@ -236,6 +255,7 @@ class FakeTickTransport:
         for sym in list(self._subscriptions):
             await self.unsubscribe(sym)
         self._connected = False
+        # End current generation only; connect() replaces the queue.
         await self._queue.put(None)
 
     async def subscribe(self, symbol: str) -> None:
@@ -255,12 +275,16 @@ class FakeTickTransport:
         self.unsubscribe_calls.append((symbol, server_id))
         self.forget_ids.append(server_id)
 
-    async def push(self, message: dict[str, Any]) -> None:
+    async def push(self, message: dict[str, Any] | None) -> None:
+        """Push a tick message, or ``None`` to simulate stream termination."""
         await self._queue.put(message)
 
     async def messages(self) -> AsyncIterator[dict[str, Any]]:
         while True:
-            item = await self._queue.get()
+            q = self._queue
+            item = await q.get()
             if item is None:
+                if q is not self._queue:
+                    continue
                 return
             yield item
