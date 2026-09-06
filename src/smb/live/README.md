@@ -1,16 +1,18 @@
 # Live market data (4A) + Live strategy & simulation (4B)
 
+**Status:** implemented and merged (milestones 4A and 4B).
+
 ## Pipeline
 
 ```
 Deriv live ticks
-    → 4A normalize / ordering / M1·M15 candles
-    → LiveMarketDataService.events()
-    → 4B LiveStrategyRunner
-    → StrategyEngine (2A) on FINALIZED candles only
-    → TradeConstructor (2B)
-    → LiveSimulationSession (2C semantics)
-    → research records
+    -> 4A normalize / ordering / M1+M15 candles
+    -> LiveMarketDataService.events()
+    -> 4B LiveStrategyRunner
+    -> StrategyEngine (2A) on FINALIZED candles only
+    -> TradeConstructor (2B)
+    -> LiveSimulationSession (2C semantics)
+    -> research records
 ```
 
 **4B does NOT place real or demo trades.**
@@ -20,30 +22,26 @@ Deriv live ticks
 | Event | Action |
 |-------|--------|
 | `LiveTick` | Advance open simulations; never alone triggers strategy |
-| `CandleEventKind.UPDATE` | Forming candle — ignored for strategy decisions |
+| `CandleEventKind.UPDATE` | Forming candle -- ignored for strategy decisions |
 | `CandleEventKind.FINALIZED` M15 | `StrategyEngine.on_m15` (context only) |
-| `CandleEventKind.FINALIZED` M1 | `StrategyEngine.on_m1` → optional signals |
+| `CandleEventKind.FINALIZED` M1 | `StrategyEngine.on_m1` -> optional signals |
 
 No lookahead: strategy only sees completed candles.
 
 At an M15 boundary, finalized events are ordered so **M15 FINALIZED is
-delivered before M1 FINALIZED** when they share the same `end_epoch`. That
-lets the strategy decision at `T` use M15 context with `end_epoch <= T`
-without inspecting a forming candle.
+delivered before M1 FINALIZED** when they share the same `end_epoch`
+(`order_candle_events`). That lets the strategy decision at `T` use M15
+context with `end_epoch <= T` without inspecting a forming candle.
 
-M15 context at an M1 decision uses only M15 candles with
-`end_epoch <= decision_epoch` (enforced inside the existing strategy engine).
+## Signal -> risk -> simulation
 
-## Signal → risk → simulation
-
-1. `StrategySignal` emitted → record `SIGNAL_GENERATED`
+1. `StrategySignal` emitted -> record `SIGNAL_GENERATED`
 2. Identity `(instrument, signal_epoch, direction)` deduplicated (bounded deque)
-3. `TradeConstructor.construct` → accept or `SIGNAL_REJECTED`
-4. On accept → `TRADE_OPENED` + `LiveSimulationSession`
-5. Subsequent ticks drive the session until TP / SL / TIMEOUT / NO_FILL → `TRADE_CLOSED`
+3. `TradeConstructor.construct` -> accept or `SIGNAL_REJECTED`
+4. On accept -> `TRADE_OPENED` + `LiveSimulationSession`
+5. Subsequent ticks drive the session until TP / SL / TIMEOUT / NO_FILL -> `TRADE_CLOSED`
 
-Concurrency: `LiveRunnerConfig.max_open_simulations` (default 1). Extra
-accepted signals beyond the limit are recorded as rejected with metadata.
+Concurrency: `LiveRunnerConfig.max_open_simulations` (default 1).
 
 ## Simulation semantics
 
@@ -64,10 +62,10 @@ after a reconnect replay of the last candle.
 
 ```
 stop requested
-  → stop accepting new signals
-  → cancel runner task
-  → optional finalize open sims (default on)
-  → market.stop()
+  -> stop accepting new signals
+  -> cancel runner task
+  -> optional finalize open sims (default on)
+  -> market.stop()
 ```
 
 ## Local run with fake stream
@@ -100,13 +98,14 @@ asyncio.run(main())
 
 ## One-week live research
 
-After merge, run the runner against the real Deriv transport for ~7 days,
-persist `LiveResearchRecord` stream (sink callback), then compare signal
-frequency, rejection rate, TP/SL/TIMEOUT, and expectancy vs historical.
+After historical gates, run the runner against the real public Deriv transport
+for ~7 days, persist `LiveResearchRecord` (e.g. via `record_sink`), then compare
+signal frequency, rejection rate, TP/SL/TIMEOUT, and expectancy vs historical.
 
 ## Boundaries
 
-**In scope:** orchestration, dedup, bounded state, research records, tests.
+**In scope:** live ticks, candles, orchestration, dedup, bounded runner state,
+research records, tests.
 
 **Out of scope:** real/demo execution, broker orders, Telegram, new strategy
-rules, ML inference gate, optimization, portfolio management.
+rules, ML live inference gate, optimization, portfolio management.
