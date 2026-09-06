@@ -3,7 +3,7 @@
 4B composes existing strategy / risk / simulation — no real or demo execution.
 """
 
-from smb.live.candle_feed import LiveCandleTracker, MultiTimeframeLiveCandles
+from smb.live.candle_feed import LiveCandleTracker, MultiTimeframeLiveCandles, order_candle_events
 from smb.live.models import (
     CandleEvent,
     CandleEventKind,
@@ -40,6 +40,7 @@ __all__ = [
     "TickDecision",
     "LiveCandleTracker",
     "MultiTimeframeLiveCandles",
+    "order_candle_events",
     "LiveMarketState",
     "LiveMarketDataService",
     "TickTransport",

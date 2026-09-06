@@ -24,9 +24,15 @@ Deriv live ticks
 | `CandleEventKind.FINALIZED` M15 | `StrategyEngine.on_m15` (context only) |
 | `CandleEventKind.FINALIZED` M1 | `StrategyEngine.on_m1` → optional signals |
 
-No lookahead: strategy only sees completed candles. M15 context at an M1
-decision uses only M15 candles with `end_epoch <= decision_epoch` (enforced
-inside the existing strategy engine).
+No lookahead: strategy only sees completed candles.
+
+At an M15 boundary, finalized events are ordered so **M15 FINALIZED is
+delivered before M1 FINALIZED** when they share the same `end_epoch`. That
+lets the strategy decision at `T` use M15 context with `end_epoch <= T`
+without inspecting a forming candle.
+
+M15 context at an M1 decision uses only M15 candles with
+`end_epoch <= decision_epoch` (enforced inside the existing strategy engine).
 
 ## Signal → risk → simulation
 
