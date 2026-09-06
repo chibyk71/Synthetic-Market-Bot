@@ -29,6 +29,18 @@ class WalkForwardConfig:
     """Deterministic expanding-window fold configuration.
 
     Sizes are counts of **labeled** observations (``target is not None``).
+
+    The 3B RandomForest hyperparameters are **not** configurable here; every
+    fold uses the fixed baseline (seed 42, 50 trees, max_depth 6, n_jobs=1).
+
+    Attributes:
+        initial_train_size: Labeled rows in the first training window.
+        test_size: Labeled rows in each test window.
+        step_size: How far the test window advances between folds.
+            Defaults to ``test_size`` (non-overlapping tests). Must be
+            ``>= test_size`` so test windows never overlap.
+        minimum_train_size: Reject folds whose training window is smaller.
+        minimum_test_size: Reject folds whose test window is smaller.
     """
 
     initial_train_size: int
@@ -36,9 +48,6 @@ class WalkForwardConfig:
     step_size: int | None = None
     minimum_train_size: int = 1
     minimum_test_size: int = 1
-    random_seed: int = DEFAULT_RANDOM_SEED
-    n_estimators: int = DEFAULT_N_ESTIMATORS
-    max_depth: int = DEFAULT_MAX_DEPTH
 
     def __post_init__(self) -> None:
         if self.initial_train_size < 1:
@@ -48,6 +57,11 @@ class WalkForwardConfig:
         step = self.test_size if self.step_size is None else self.step_size
         if step < 1:
             raise ValueError("step_size must be >= 1")
+        if step < self.test_size:
+            raise ValueError(
+                f"step_size ({step}) must be >= test_size ({self.test_size}) "
+                "to prevent overlapping test windows"
+            )
         if self.minimum_train_size < 1:
             raise ValueError("minimum_train_size must be >= 1")
         if self.minimum_test_size < 1:
@@ -218,10 +232,11 @@ def _fit_fold_model(
         return None
     if len(set(y_train)) < 1:
         return None
+    # Fixed 3B baseline — not configurable via WalkForwardConfig
     clf = RandomForestClassifier(
-        n_estimators=config.n_estimators,
-        max_depth=config.max_depth,
-        random_state=config.random_seed,
+        n_estimators=DEFAULT_N_ESTIMATORS,
+        max_depth=DEFAULT_MAX_DEPTH,
+        random_state=DEFAULT_RANDOM_SEED,
         n_jobs=1,
     )
     clf.fit(X_train, y_train)
