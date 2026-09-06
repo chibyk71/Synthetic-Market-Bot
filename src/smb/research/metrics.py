@@ -3,6 +3,9 @@
 Consumes an immutable :class:`~smb.simulation.models.TradeSimulationResult`
 and the same chronological tick stream used for simulation. Does **not**
 re-simulate fills or change 2C outcomes.
+
+Observation bounds come exclusively from the simulation result (``entry_time``
+and ``exit_time``), never from a separately configured horizon.
 """
 
 from __future__ import annotations
@@ -12,11 +15,7 @@ from collections.abc import Iterable
 
 from smb.deriv.history import Tick
 from smb.research.models import TradeResearchMetrics
-from smb.simulation.models import (
-    SimulationConfig,
-    SimulationOutcome,
-    TradeSimulationResult,
-)
+from smb.simulation.models import SimulationOutcome, TradeSimulationResult
 from smb.strategy.models import Direction
 
 
@@ -32,16 +31,17 @@ class ResearchMetricsCalculator:
     """Compute direction-aware MFE / MAE for a completed simulation.
 
     Observation window for filled trades:
-    - starts at the actual fill epoch (``entry_time``)
-    - ends at the simulation exit epoch for TP/SL, or at
-      ``signal_epoch + max_duration_seconds`` for TIMEOUT
-    - only ticks with ``signal_epoch < epoch <= window_end`` and
-      ``epoch >= entry_time`` participate
+    - starts at the actual fill epoch (``simulation.entry_time``)
+    - ends at the authoritative simulation exit (``simulation.exit_time``)
+      for TP, SL, and TIMEOUT alike
+    - only ticks with ``epoch >= entry_time`` and ``epoch <= exit_time``
+      participate (and still ``epoch > signal_epoch``)
     - pre-fill ticks never affect MAE/MFE
-    """
 
-    def __init__(self, config: SimulationConfig | None = None) -> None:
-        self.config = config if config is not None else SimulationConfig()
+    The calculator does **not** reconstruct a horizon from
+    :class:`~smb.simulation.models.SimulationConfig`; the 2C result is the
+    sole source of truth for the observation boundary.
+    """
 
     def calculate(
         self,
@@ -79,22 +79,19 @@ class ResearchMetricsCalculator:
 
         if simulation.entry_time is None or simulation.entry_price is None:
             raise ValueError("filled simulation requires entry_time and entry_price")
+        if simulation.exit_time is None:
+            raise ValueError(
+                "filled simulation requires exit_time "
+                "(TP/SL exit epoch or TIMEOUT horizon_end)"
+            )
         if not _is_finite_price(simulation.entry_price):
             raise ValueError("entry_price must be finite")
 
         signal_epoch = simulation.signal_epoch
         entry_time = simulation.entry_time
         entry_price = simulation.entry_price
-        horizon_end = signal_epoch + self.config.max_duration_seconds
+        window_end = simulation.exit_time
         direction = simulation.direction
-
-        # Observation ends at exit for TP/SL; at configured horizon for TIMEOUT
-        if simulation.outcome in (SimulationOutcome.TP, SimulationOutcome.SL):
-            if simulation.exit_time is None:
-                raise ValueError(f"{simulation.outcome} requires exit_time")
-            window_end = simulation.exit_time
-        else:
-            window_end = horizon_end
 
         mfe = 0.0
         mae = 0.0
@@ -111,9 +108,6 @@ class ResearchMetricsCalculator:
             if epoch < entry_time:
                 continue
             if epoch > window_end:
-                break
-            # Safety: never use post-horizon ticks even if window_end is looser
-            if epoch > horizon_end:
                 break
 
             if not _is_finite_price(price):
