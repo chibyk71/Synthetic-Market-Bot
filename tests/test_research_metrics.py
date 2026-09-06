@@ -182,10 +182,8 @@ def _sim_engine(max_duration_seconds: int = 900) -> SimulationEngine:
     return SimulationEngine(SimulationConfig(max_duration_seconds=max_duration_seconds))
 
 
-def _calc(max_duration_seconds: int = 900) -> ResearchMetricsCalculator:
-    return ResearchMetricsCalculator(
-        SimulationConfig(max_duration_seconds=max_duration_seconds)
-    )
+def _calc() -> ResearchMetricsCalculator:
+    return ResearchMetricsCalculator()
 
 
 def _run(
@@ -195,7 +193,7 @@ def _run(
     max_duration_seconds: int = 900,
 ) -> tuple[TradeSimulationResult, TradeResearchMetrics]:
     sim = _sim_engine(max_duration_seconds).simulate(candidate, ticks)
-    metrics = _calc(max_duration_seconds).calculate(sim, ticks)
+    metrics = _calc().calculate(sim, ticks)
     return sim, metrics
 
 
@@ -482,11 +480,13 @@ def test_ticks_after_exit_excluded():
 def test_empty_post_fill_observation():
     """Filled but no ticks at/after fill in the provided stream → zero excursions."""
     c = _candidate(direction=Direction.LONG, entry_price=100.0)
+    # Manually craft a filled simulation without matching post-fill ticks
     sim = _sim_engine(max_duration_seconds=15).simulate(
         c, [_tick(1001, 100.0), _tick(1005, 101.0)]
     )
     assert sim.filled is True
-    m = _calc(15).calculate(sim, [_tick(999, 50.0), _tick(1000, 50.0)])
+    # Calculate with empty / pre-only stream
+    m = _calc().calculate(sim, [_tick(999, 50.0), _tick(1000, 50.0)])
     assert m.mfe == pytest.approx(0.0)
     assert m.mae == pytest.approx(0.0)
     assert m.mfe_time == sim.entry_time
@@ -541,3 +541,32 @@ def test_signal_tick_excluded_from_metrics():
     _, m = _run(c, ticks)
     assert m.mae == pytest.approx(0.0)
     assert m.mfe == pytest.approx(10.0)
+
+
+def test_metrics_use_simulation_exit_not_calculator_horizon():
+    """2D must honor simulation.exit_time even if a longer stream is available.
+
+    Simulates with a 15s horizon (TIMEOUT exit_time=1015). A later tick at
+    1025 must not affect MFE even though it is present in the metrics stream.
+    """
+    c = _candidate(
+        direction=Direction.LONG,
+        entry_price=100.0,
+        stop_loss=90.0,
+        take_profit=200.0,
+    )
+    ticks = [
+        _tick(1001, 100.0),  # fill
+        _tick(1005, 105.0),  # max in-horizon favorable
+        _tick(1025, 180.0),  # outside 2C horizon — must be ignored by 2D
+    ]
+    sim = _sim_engine(max_duration_seconds=15).simulate(c, ticks)
+    assert sim.outcome == SimulationOutcome.TIMEOUT
+    assert sim.exit_time == 1015
+
+    m = ResearchMetricsCalculator().calculate(sim, ticks)
+    assert m.observation_end == sim.exit_time == 1015
+    assert m.mfe == pytest.approx(5.0)
+    assert m.mfe_time == 1005
+    # Explicitly not 80 from the post-horizon tick
+    assert m.mfe != pytest.approx(80.0)
