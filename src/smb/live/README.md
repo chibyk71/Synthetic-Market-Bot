@@ -1,51 +1,106 @@
-# Milestone 4A — Live Market Data
-
-Reliable live ticks and M1/M15 candles from Deriv public WebSocket data.
+# Live market data (4A) + Live strategy & simulation (4B)
 
 ## Pipeline
 
 ```
-Deriv WebSocket → normalize → ordering gate → M1/M15 candles → LiveMarketState
+Deriv live ticks
+    → 4A normalize / ordering / M1·M15 candles
+    → LiveMarketDataService.events()
+    → 4B LiveStrategyRunner
+    → StrategyEngine (2A) on FINALIZED candles only
+    → TradeConstructor (2B)
+    → LiveSimulationSession (2C semantics)
+    → research records
 ```
 
-4B will consume `LiveMarketState` and `LiveMarketDataService.events()`.
+**4B does NOT place real or demo trades.**
 
-## Boundaries
+## Event flow
 
-**In scope:** connection lifecycle, symbol discovery, tick normalization,
-duplicate/stale handling, live candle UPDATE/FINALIZED events, reconnect with
-bounded backoff, stream status.
+| Event | Action |
+|-------|--------|
+| `LiveTick` | Advance open simulations; never alone triggers strategy |
+| `CandleEventKind.UPDATE` | Forming candle — ignored for strategy decisions |
+| `CandleEventKind.FINALIZED` M15 | `StrategyEngine.on_m15` (context only) |
+| `CandleEventKind.FINALIZED` M1 | `StrategyEngine.on_m1` → optional signals |
 
-**Out of scope:** strategy, risk, simulation, ML, health gates, demo/real
-execution, order placement.
+No lookahead: strategy only sees completed candles. M15 context at an M1
+decision uses only M15 candles with `end_epoch <= decision_epoch` (enforced
+inside the existing strategy engine).
 
-## Tick ordering policy
+## Signal → risk → simulation
 
-| Condition | Action |
-|-----------|--------|
-| `epoch < last` | drop (stale) |
-| `epoch == last` and same price | drop (duplicate) |
-| `epoch == last` and new price | accept (same-second update) |
-| `epoch > last` | accept |
+1. `StrategySignal` emitted → record `SIGNAL_GENERATED`
+2. Identity `(instrument, signal_epoch, direction)` deduplicated (bounded deque)
+3. `TradeConstructor.construct` → accept or `SIGNAL_REJECTED`
+4. On accept → `TRADE_OPENED` + `LiveSimulationSession`
+5. Subsequent ticks drive the session until TP / SL / TIMEOUT / NO_FILL → `TRADE_CLOSED`
 
-Timestamps are never fabricated.
+Concurrency: `LiveRunnerConfig.max_open_simulations` (default 1). Extra
+accepted signals beyond the limit are recorded as rejected with metadata.
 
-## Candles
+## Simulation semantics
 
-Bucket: `start = (epoch // T) * T`. Tick at exact next boundary opens the new
-candle. Events:
+`LiveSimulationSession` applies the same rules as `SimulationEngine.simulate`:
 
-- `CandleEventKind.UPDATE` — open candle OHLC changed (`finalized=False`)
-- `CandleEventKind.FINALIZED` — period ended; snapshot is immutable
-
-M1 and M15 are built from the **same** accepted tick stream.
+- ticks with `epoch <= signal_epoch` ignored
+- horizon = `signal_epoch + max_duration_seconds` (default 900s)
+- touch entry; same-tick SL over TP
+- TIMEOUT exit_time = horizon_end
 
 ## Reconnect
 
-Disconnect → exponential backoff (0.5…8s, max attempts) → reconnect →
-resubscribe once per symbol → resume. No duplicate subscriptions.
+4A owns reconnect / resubscribe. 4B keeps open simulation sessions across
+temporary disconnects. Dedup prevents re-processing the same finalized signal
+after a reconnect replay of the last candle.
 
-## Testing
+## Shutdown
 
-All tests use `FakeTickTransport` and injected `symbol_resolver`. No live
-Deriv connection is required.
+```
+stop requested
+  → stop accepting new signals
+  → cancel runner task
+  → optional finalize open sims (default on)
+  → market.stop()
+```
+
+## Local run with fake stream
+
+```python
+import asyncio
+from smb.live import (
+    FakeTickTransport,
+    LiveMarketDataService,
+    LiveStrategyRunner,
+    LiveRunnerConfig,
+    make_fake_symbol,
+)
+
+async def main():
+    transport = FakeTickTransport()
+    market = LiveMarketDataService(
+        "Volatility 75 (1s) Index",
+        transport=transport,
+        symbol_resolver=lambda n: make_fake_symbol(n, "1HZ75V"),
+    )
+    runner = LiveStrategyRunner(market, config=LiveRunnerConfig())
+    await runner.start()
+    await runner.stop()
+    for rec in runner.records:
+        print(rec)
+
+asyncio.run(main())
+```
+
+## One-week live research
+
+After merge, run the runner against the real Deriv transport for ~7 days,
+persist `LiveResearchRecord` stream (sink callback), then compare signal
+frequency, rejection rate, TP/SL/TIMEOUT, and expectancy vs historical.
+
+## Boundaries
+
+**In scope:** orchestration, dedup, bounded state, research records, tests.
+
+**Out of scope:** real/demo execution, broker orders, Telegram, new strategy
+rules, ML inference gate, optimization, portfolio management.
