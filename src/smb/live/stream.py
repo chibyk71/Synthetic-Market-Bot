@@ -150,7 +150,6 @@ class LiveMarketDataService:
                         return
                     await self._handle_message(msg)
                     reconnect_attempt = 0
-                # Message stream ended — reconnect unless shutting down.
                 if self._closed or not self._running:
                     return
                 logger.warning("Live message stream ended; attempting reconnect")
@@ -193,7 +192,7 @@ class LiveMarketDataService:
         try:
             await self._transport.close()
         except Exception:
-            logger.debug("close before reconnect failed", exp_info=True)
+            logger.debug("close before reconnect failed", exc_info=True)
         try:
             await self._connect_and_subscribe()
             return True
@@ -218,7 +217,7 @@ class LiveMarketDataService:
                 expected_symbol=self._symbol_info.symbol,
             )
         except MalformedTickError as exc:
-            logger.debug("Dropping malformed tick: %s", exp_info=True)
+            logger.debug("Dropping malformed tick: %s", exc)
             return
         decision = self._gate.accept(tick)
         if not decision.accepted:
