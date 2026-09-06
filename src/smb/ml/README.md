@@ -1,3 +1,12 @@
+# ML research (3B + 3C)
+
+**Status:** implemented and merged.
+
+The model is a **filter/gate** on strategy candidates, not a signal generator.
+Live ML inference is **not** part of 4B and is not implemented as an online path.
+
+---
+
 # Milestone 3B — ML Dataset + Model
 
 ## Purpose
