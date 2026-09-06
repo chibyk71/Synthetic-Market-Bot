@@ -44,12 +44,7 @@ def normalize_tick_message(
     epoch = body.get("epoch")
     if epoch is None:
         raise MalformedTickError("missing epoch")
-    try:
-        epoch_i = int(epoch)
-    except (TypeError, ValueError) as exc:
-        raise MalformedTickError(f"invalid epoch: {epoch!r}") from exc
-    if epoch_i < 0:
-        raise MalformedTickError(f"negative epoch: {epoch_i}")
+    epoch_i = _parse_strict_epoch(epoch)
     if not instrument or not str(instrument).strip():
         raise MalformedTickError("instrument must be non-empty")
     return LiveTick(
@@ -57,5 +52,41 @@ def normalize_tick_message(
         symbol=symbol,
         price=price_f,
         epoch=epoch_i,
-        raw=dict(body),
     )
+
+
+def _parse_strict_epoch(epoch: object) -> int:
+    """Accept only true integers (or integer-valued numeric strings).
+
+    Rejects bool, fractional floats, fractional strings, and non-numeric values.
+    Never silently truncates.
+    """
+    if isinstance(epoch, bool):
+        raise MalformedTickError(f"invalid epoch (bool): {epoch!r}")
+    if isinstance(epoch, int):
+        if epoch < 0:
+            raise MalformedTickError(f"negative epoch: {epoch}")
+        return epoch
+    if isinstance(epoch, float):
+        if epoch != epoch or epoch in (float("inf"), float("-inf")):
+            raise MalformedTickError(f"non-finite epoch: {epoch!r}")
+        if not epoch.is_integer():
+            raise MalformedTickError(f"fractional epoch: {epoch!r}")
+        epoch_i = int(epoch)
+        if epoch_i < 0:
+            raise MalformedTickError(f"negative epoch: {epoch_i}")
+        return epoch_i
+    if isinstance(epoch, str):
+        s = epoch.strip()
+        if not s:
+            raise MalformedTickError("empty epoch string")
+        if s[0] in "+-" and s[1:].isdigit():
+            epoch_i = int(s)
+        elif s.isdigit():
+            epoch_i = int(s)
+        else:
+            raise MalformedTickError(f"invalid epoch string: {epoch!r}")
+        if epoch_i < 0:
+            raise MalformedTickError(f"negative epoch: {epoch_i}")
+        return epoch_i
+    raise MalformedTickError(f"invalid epoch type: {type(epoch).__name__}")
