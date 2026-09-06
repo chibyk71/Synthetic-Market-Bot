@@ -1,4 +1,4 @@
-"""Milestone 3B — ML dataset construction and baseline classification model.
+"""Milestone 3B/3C — ML dataset, baseline model, and walk-forward validation.
 
 The ML layer is a **filter/gate** over mechanical strategy candidates.
 It does not generate trades. Features use only signal-time information;
@@ -12,11 +12,11 @@ Pipeline::
             ↓
     MLObservation / MLDataset
             ↓
-    ChronologicalSplit
+    ChronologicalSplit | Walk-forward folds
             ↓
-    RandomForestClassifier (seeded)
+    RandomForestClassifier (seeded, fresh per fold)
             ↓
-    EvaluationReport + ModelArtifact
+    EvaluationReport + ModelArtifact / WalkForwardResult
 """
 
 from smb.ml.dataset import build_dataset, build_observation, metrics_index, resolve_target
@@ -40,6 +40,15 @@ from smb.ml.trainer import (
     predict,
     save_model,
     train_baseline,
+)
+from smb.ml.walk_forward import (
+    WalkForwardConfig,
+    WalkForwardFold,
+    WalkForwardFoldResult,
+    WalkForwardResult,
+    default_walk_forward_config,
+    generate_folds,
+    run_walk_forward_validation,
 )
 
 __all__ = [
@@ -67,4 +76,11 @@ __all__ = [
     "save_model",
     "load_model",
     "DEFAULT_RANDOM_SEED",
+    "WalkForwardConfig",
+    "WalkForwardFold",
+    "WalkForwardFoldResult",
+    "WalkForwardResult",
+    "generate_folds",
+    "run_walk_forward_validation",
+    "default_walk_forward_config",
 ]
