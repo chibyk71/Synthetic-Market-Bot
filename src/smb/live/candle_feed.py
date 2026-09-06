@@ -114,6 +114,38 @@ class LiveCandleTracker:
         )
 
 
+# Longer timeframes first on equal end_epoch so context (M15) is available
+# before the decision timeframe (M1) evaluates at a shared boundary.
+_TF_SECONDS: dict[str, int] = {
+    TIMEFRAME_M1.name: TIMEFRAME_M1.seconds,
+    TIMEFRAME_M15.name: TIMEFRAME_M15.seconds,
+}
+
+
+def order_candle_events(events: Sequence[CandleEvent]) -> list[CandleEvent]:
+    """Order events for strategy-safe multi-timeframe decisions.
+
+    Sort key (ascending):
+    1. ``candle.end_epoch`` — chronological
+    2. timeframe duration descending — M15 before M1 when they share an end
+    3. FINALIZED before UPDATE — completed context before forming updates
+
+    At an M15 boundary where both M1 and M15 finalize at the same ``T``::
+
+        M15 FINALIZED (end=T) → M1 FINALIZED (end=T) → updates…
+
+    so ``StrategyEngine.on_m15`` runs before ``on_m1`` and the decision at ``T``
+    can use M15 context with ``end_epoch <= decision_epoch``.
+    """
+
+    def _key(event: CandleEvent) -> tuple[int, int, int]:
+        tf_secs = _TF_SECONDS.get(event.candle.timeframe, 0)
+        kind_rank = 0 if event.kind is CandleEventKind.FINALIZED else 1
+        return (event.candle.end_epoch, -tf_secs, kind_rank)
+
+    return sorted(events, key=_key)
+
+
 class MultiTimeframeLiveCandles:
     def __init__(
         self,
@@ -130,7 +162,7 @@ class MultiTimeframeLiveCandles:
         events: list[CandleEvent] = []
         for tracker in self._trackers.values():
             events.extend(tracker.on_tick(tick))
-        return events
+        return order_candle_events(events)
 
     def current(self, timeframe: str) -> Candle | None:
         tr = self._trackers.get(timeframe)
