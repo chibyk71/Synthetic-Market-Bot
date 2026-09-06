@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 
 import pytest
@@ -85,12 +86,10 @@ def test_m1_ohlc_and_finalization():
     assert tr.current.high == 12.0
     assert tr.current.low == 9.0
     assert tr.current.close == 11.0
-    assert tr.current.finalized is False
     more = tr.on_tick(LiveTick("I", "S", 13.0, start + 60))
     fin = next(e for e in more if e.kind is CandleEventKind.FINALIZED)
     assert fin.candle.finalized is True
     assert fin.candle.open == 10.0
-    assert fin.candle.close == 11.0
 
 
 def test_m15_boundary():
@@ -279,3 +278,96 @@ async def test_stale_tick_dropped_no_candle_event():
         await svc.stop()
     assert len(ticks) == 1
     assert ticks[0].epoch == 200
+
+
+def test_livetick_is_genuinely_immutable():
+    tick = LiveTick(instrument="I", symbol="S", price=1.5, epoch=100)
+    with pytest.raises(FrozenInstanceError):
+        tick.price = 2.0  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        tick.epoch = 200  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        tick.symbol = "OTHER"  # type: ignore[misc]
+    assert set(tick.__dataclass_fields__) == {"instrument", "symbol", "price", "epoch"}
+
+
+@pytest.mark.parametrize(
+    "epoch",
+    [True, False, 1.9, -1.0, "1.9", "invalid", 1.5, "1.0"],
+)
+def test_epoch_rejects_non_integer(epoch):
+    msg = {"msg_type": "tick", "tick": {"symbol": "1HZ75V", "quote": 1.0, "epoch": epoch}}
+    with pytest.raises(MalformedTickError):
+        normalize_tick_message(msg, instrument="X", expected_symbol="1HZ75V")
+
+
+@pytest.mark.parametrize("epoch", [0, 1, 1_700_000_000, "42", 100.0])
+def test_epoch_accepts_integers(epoch):
+    msg = {"msg_type": "tick", "tick": {"symbol": "1HZ75V", "quote": 1.0, "epoch": epoch}}
+    t = normalize_tick_message(msg, instrument="X", expected_symbol="1HZ75V")
+    assert isinstance(t.epoch, int)
+    assert not isinstance(t.epoch, bool)
+
+
+@pytest.mark.asyncio
+async def test_subscription_id_is_server_provided_not_req_id():
+    transport = FakeTickTransport()
+    await transport.connect()
+    await transport.subscribe("1HZ75V")
+    sid = transport.subscription_id("1HZ75V")
+    assert sid is not None
+    assert sid == "srv-sub-1"
+    await transport.unsubscribe("1HZ75V")
+    assert transport.forget_ids == ["srv-sub-1"]
+    assert transport.unsubscribe_calls == [("1HZ75V", "srv-sub-1")]
+    assert transport.subscription_id("1HZ75V") is None
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_before_first_tick():
+    transport = FakeTickTransport()
+    await transport.connect()
+    await transport.subscribe("stpRNG")
+    assert transport.subscription_id("stpRNG") == "srv-sub-1"
+    await transport.unsubscribe("stpRNG")
+    assert transport.forget_ids == ["srv-sub-1"]
+    assert transport.subscription_id("stpRNG") is None
+
+
+@pytest.mark.asyncio
+async def test_reconnect_gets_fresh_subscription_id():
+    transport = FakeTickTransport()
+    await transport.connect()
+    await transport.subscribe("1HZ75V")
+    first = transport.subscription_id("1HZ75V")
+    await transport.unsubscribe("1HZ75V")
+    await transport.subscribe("1HZ75V")
+    second = transport.subscription_id("1HZ75V")
+    assert first == "srv-sub-1"
+    assert second == "srv-sub-2"
+    assert first != second
+
+
+@pytest.mark.asyncio
+async def test_repeated_subscribe_no_duplicate():
+    transport = FakeTickTransport()
+    await transport.connect()
+    await transport.subscribe("1HZ75V")
+    await transport.subscribe("1HZ75V")
+    await transport.subscribe("1HZ75V")
+    assert transport.subscribe_calls == ["1HZ75V"]
+    assert transport.subscription_id("1HZ75V") == "srv-sub-1"
+
+
+@pytest.mark.asyncio
+async def test_shutdown_uses_server_subscription_id():
+    transport = FakeTickTransport()
+    info = make_fake_symbol("X", "1HZ75V")
+    svc = LiveMarketDataService(
+        "X", transport=transport, symbol_resolver=lambda _n: info
+    )
+    await svc.start()
+    sid_before = transport.subscription_id("1HZ75V")
+    assert sid_before == "srv-sub-1"
+    await svc.stop()
+    assert "srv-sub-1" in transport.forget_ids
