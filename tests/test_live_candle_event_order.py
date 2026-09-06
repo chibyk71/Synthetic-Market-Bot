@@ -5,18 +5,17 @@ from __future__ import annotations
 from smb.live import (
     CandleEvent,
     CandleEventKind,
+    FakeTickTransport,
+    LiveMarketDataService,
     LiveRunnerConfig,
     LiveStrategyRunner,
     LiveTick,
     MultiTimeframeLiveCandles,
-    FakeTickTransport,
-    LiveMarketDataService,
     make_fake_symbol,
     order_candle_events,
 )
 from smb.market.candles import Candle
 from smb.strategy import StrategyConfig
-
 
 INSTRUMENT = "vol75"
 

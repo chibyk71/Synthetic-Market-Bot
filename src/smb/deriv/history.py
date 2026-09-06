@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from smb.deriv.client import DerivClient
@@ -69,7 +69,7 @@ class HistoryPage:
 
 
 def _epoch_to_utc(epoch: int | float) -> datetime:
-    return datetime.fromtimestamp(int(epoch), tz=timezone.utc)
+    return datetime.fromtimestamp(int(epoch), tz=UTC)
 
 
 def parse_history_response(

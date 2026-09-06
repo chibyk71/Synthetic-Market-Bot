@@ -11,7 +11,6 @@ import logging
 from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any
 
 from smb.live.models import CandleEvent, CandleEventKind, LiveTick
 from smb.live.records import (

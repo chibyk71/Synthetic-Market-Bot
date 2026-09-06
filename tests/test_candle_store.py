@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -27,7 +27,7 @@ def _st(instrument: str, epoch: int, price: float) -> StoredTick:
 
 def _tick(epoch: int, price: float) -> Tick:
     return Tick(
-        timestamp=datetime.fromtimestamp(epoch, tz=timezone.utc),
+        timestamp=datetime.fromtimestamp(epoch, tz=UTC),
         price=price,
         epoch=epoch,
     )

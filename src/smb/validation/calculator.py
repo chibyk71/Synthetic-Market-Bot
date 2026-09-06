@@ -15,7 +15,6 @@ from collections.abc import Sequence
 
 from smb.research.models import TradeResearchMetrics
 from smb.simulation.models import SimulationOutcome, TradeSimulationResult
-from smb.strategy.models import Direction
 from smb.validation.models import (
     CohortStats,
     DurationStats,

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Final
 
 from smb.deriv.history import Tick
@@ -91,11 +91,11 @@ class Candle:
 
     @property
     def start_time(self) -> datetime:
-        return datetime.fromtimestamp(self.start_epoch, tz=timezone.utc)
+        return datetime.fromtimestamp(self.start_epoch, tz=UTC)
 
     @property
     def end_time(self) -> datetime:
-        return datetime.fromtimestamp(self.end_epoch, tz=timezone.utc)
+        return datetime.fromtimestamp(self.end_epoch, tz=UTC)
 
 
 class CandleBuilder:

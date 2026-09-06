@@ -9,7 +9,6 @@ import pytest
 from smb.deriv.history import Tick
 from smb.research import ResearchMetricsCalculator, TradeResearchMetrics
 from smb.simulation import (
-    ExitReason,
     SimulationConfig,
     SimulationEngine,
     SimulationOutcome,

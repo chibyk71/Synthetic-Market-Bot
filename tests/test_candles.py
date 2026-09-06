@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -20,7 +20,7 @@ from smb.market.candles import (
 
 def _tick(epoch: int, price: float) -> Tick:
     return Tick(
-        timestamp=datetime.fromtimestamp(epoch, tz=timezone.utc),
+        timestamp=datetime.fromtimestamp(epoch, tz=UTC),
         price=price,
         epoch=epoch,
     )

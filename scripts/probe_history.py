@@ -154,7 +154,7 @@ async def main() -> int:
         print(f"  Overlap epochs: {len(overlap)}")
         print(f"  Chronological (A): "
               f"{list(page_a.ticks) == sorted(page_a.ticks, key=lambda t: t.epoch)}")
-        print(f"  Safe cursor advance: end = earliest_epoch - 1")
+        print("  Safe cursor advance: end = earliest_epoch - 1")
         print()
 
         for _key, display_name in targets.items():

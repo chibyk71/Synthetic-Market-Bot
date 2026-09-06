@@ -7,8 +7,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-import pytest
-
 from smb.deriv.history import Tick
 from smb.live import (
     CandleEvent,
@@ -28,7 +26,6 @@ from smb.live import (
 )
 from smb.market.candles import Candle
 from smb.simulation import (
-    ExitReason,
     SimulationConfig,
     SimulationEngine,
     SimulationOutcome,
@@ -44,7 +41,6 @@ from smb.strategy.models import (
     SwingPoint,
 )
 from smb.trade import RiskContext, TradeConstructor
-
 
 INSTRUMENT = "vol75"
 

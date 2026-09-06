@@ -22,7 +22,6 @@ from smb.trade.models import (
     TradeConstructionResult,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers — minimal valid signal for model tests
 # ---------------------------------------------------------------------------

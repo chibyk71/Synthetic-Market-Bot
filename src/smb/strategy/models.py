@@ -5,10 +5,11 @@ Output is a raw strategy signal only — never a trade, order, or risk object.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
 
 
 class Direction(StrEnum):

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, patch
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -18,7 +18,6 @@ from smb.deriv.history import (
     flatten_pages,
     parse_history_response,
 )
-
 
 SAMPLE_HISTORY = {
     "echo_req": {
@@ -47,9 +46,9 @@ def test_parse_history_success():
     assert page.earliest is not None
     assert page.earliest.epoch == 1700000001
     assert page.earliest.price == 100.0
-    assert page.earliest.timestamp == datetime(2023, 11, 14, 22, 13, 21, tzinfo=timezone.utc)
+    assert page.earliest.timestamp == datetime(2023, 11, 14, 22, 13, 21, tzinfo=UTC)
     assert page.latest.epoch == 1700000005
-    assert page.ticks[0].timestamp.tzinfo is timezone.utc
+    assert page.ticks[0].timestamp.tzinfo is UTC
 
 
 def test_pip_size_preserves_decimal_precision():
@@ -145,9 +144,9 @@ def test_stats_detects_non_monotonic_source_order():
 
 def test_compute_tick_stats_basic():
     ticks = [
-        Tick(timestamp=datetime.fromtimestamp(10, tz=timezone.utc), price=1.0, epoch=10),
-        Tick(timestamp=datetime.fromtimestamp(11, tz=timezone.utc), price=1.5, epoch=11),
-        Tick(timestamp=datetime.fromtimestamp(13, tz=timezone.utc), price=1.25, epoch=13),
+        Tick(timestamp=datetime.fromtimestamp(10, tz=UTC), price=1.0, epoch=10),
+        Tick(timestamp=datetime.fromtimestamp(11, tz=UTC), price=1.5, epoch=11),
+        Tick(timestamp=datetime.fromtimestamp(13, tz=UTC), price=1.25, epoch=13),
     ]
     stats = compute_tick_stats(ticks)
     assert stats.count == 3
@@ -163,9 +162,9 @@ def test_compute_tick_stats_basic():
 
 def test_compute_tick_stats_duplicates_and_nonmonotonic():
     ticks = [
-        Tick(timestamp=datetime.fromtimestamp(10, tz=timezone.utc), price=1.0, epoch=10),
-        Tick(timestamp=datetime.fromtimestamp(10, tz=timezone.utc), price=1.1, epoch=10),
-        Tick(timestamp=datetime.fromtimestamp(9, tz=timezone.utc), price=0.9, epoch=9),
+        Tick(timestamp=datetime.fromtimestamp(10, tz=UTC), price=1.0, epoch=10),
+        Tick(timestamp=datetime.fromtimestamp(10, tz=UTC), price=1.1, epoch=10),
+        Tick(timestamp=datetime.fromtimestamp(9, tz=UTC), price=0.9, epoch=9),
     ]
     stats = compute_tick_stats(ticks)
     assert stats.duplicate_epochs == 1
@@ -182,16 +181,16 @@ def test_flatten_pages_dedup_and_order():
     p1 = HistoryPage(
         symbol="X",
         ticks=(
-            Tick(timestamp=datetime.fromtimestamp(3, tz=timezone.utc), price=3.0, epoch=3),
-            Tick(timestamp=datetime.fromtimestamp(4, tz=timezone.utc), price=4.0, epoch=4),
+            Tick(timestamp=datetime.fromtimestamp(3, tz=UTC), price=3.0, epoch=3),
+            Tick(timestamp=datetime.fromtimestamp(4, tz=UTC), price=4.0, epoch=4),
         ),
     )
     p2 = HistoryPage(
         symbol="X",
         ticks=(
-            Tick(timestamp=datetime.fromtimestamp(1, tz=timezone.utc), price=1.0, epoch=1),
-            Tick(timestamp=datetime.fromtimestamp(2, tz=timezone.utc), price=2.0, epoch=2),
-            Tick(timestamp=datetime.fromtimestamp(3, tz=timezone.utc), price=3.0, epoch=3),
+            Tick(timestamp=datetime.fromtimestamp(1, tz=UTC), price=1.0, epoch=1),
+            Tick(timestamp=datetime.fromtimestamp(2, tz=UTC), price=2.0, epoch=2),
+            Tick(timestamp=datetime.fromtimestamp(3, tz=UTC), price=3.0, epoch=3),
         ),
     )
     merged = flatten_pages([p1, p2])

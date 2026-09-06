@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -25,7 +25,7 @@ def _st(instrument: str, epoch: int, price: float) -> StoredTick:
 
 def _tick(epoch: int, price: float) -> Tick:
     return Tick(
-        timestamp=datetime.fromtimestamp(epoch, tz=timezone.utc),
+        timestamp=datetime.fromtimestamp(epoch, tz=UTC),
         price=price,
         epoch=epoch,
     )
@@ -310,9 +310,9 @@ def test_source_order_preserved_across_month_boundary(store: ParquetTickStore):
 
 
 def _year_month_check(epoch: int) -> tuple[int, int]:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+    dt = datetime.fromtimestamp(epoch, tz=UTC)
     return dt.year, dt.month
 
 
