@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from smb.data.models import StoredTick
 from smb.data.repository import TickRepository
 from smb.data.store import ParquetTickStore
+from smb.deriv.history import Tick
 from smb.research.experiment import (
     ExperimentConfig,
     ExperimentError,
@@ -155,3 +157,82 @@ def test_cli_run_help():
     with pytest.raises(SystemExit) as ei:
         main(["run", "--help"])
     assert ei.value.code == 0
+
+
+def test_simulation_streams_without_materializing_full_window(store: ParquetTickStore):
+    """Harness must stream simulation ticks; stream call count stays small."""
+    ticks = [(1_700_000_000 + i, 100.0 + (i % 10) * 0.01) for i in range(2_000)]
+    _write_ticks(store, "vol", ticks)
+    repo = TickRepository(store)
+
+    class _Wrap(TickRepository):
+        def __init__(self, inner: TickRepository) -> None:
+            super().__init__(inner.store)
+            self.inner = inner
+            self.stream_calls = 0
+
+        def as_tick_stream(self, instrument, *, start_epoch=None, end_epoch=None):
+            self.stream_calls += 1
+            gen = self.inner.as_tick_stream(
+                instrument, start_epoch=start_epoch, end_epoch=end_epoch
+            )
+
+            def _guarded():
+                yield from gen
+
+            return _guarded()
+
+    wrap = _Wrap(repo)
+    result = HistoricalResearchExperiment(
+        wrap, config=ExperimentConfig(instrument="vol")
+    ).run()
+    assert wrap.stream_calls <= 2
+    assert result.summary.ticks_processed == 2000
+
+
+def test_explicit_end_epoch_limits_simulation_ticks(store: ParquetTickStore):
+    """Simulation must not consume ticks with epoch >= experiment end_epoch."""
+    start = 1_700_000_000
+    ticks = [(start + i, 100.0) for i in range(3_000)]
+    _write_ticks(store, "vol", ticks)
+    end = start + 1_500
+    repo = TickRepository(store)
+
+    class _Spy(TickRepository):
+        def __init__(self, inner: TickRepository) -> None:
+            super().__init__(inner.store)
+            self.inner = inner
+            self.sim_epochs: list[int] = []
+            self.calls = 0
+
+        def as_tick_stream(self, instrument, *, start_epoch=None, end_epoch=None):
+            self.calls += 1
+            for t in self.inner.as_tick_stream(
+                instrument, start_epoch=start_epoch, end_epoch=end_epoch
+            ):
+                if self.calls >= 2:
+                    self.sim_epochs.append(t.epoch)
+                yield t
+
+    spy = _Spy(repo)
+    result = HistoricalResearchExperiment(
+        spy,
+        config=ExperimentConfig(instrument="vol", start_epoch=start, end_epoch=end),
+    ).run()
+    assert result.summary.ticks_processed == 1500
+    if spy.sim_epochs:
+        assert max(spy.sim_epochs) < end
+
+
+def test_long_stream_orchestration_does_not_require_full_list(store: ParquetTickStore):
+    """Larger synthetic series still completes via streaming."""
+    start = 1_700_000_000
+    n = 12_000
+    ticks = [(start + i, 80.0 + (i % 50) * 0.02) for i in range(n)]
+    _write_ticks(store, "vol", ticks)
+    result = HistoricalResearchExperiment(
+        TickRepository(store),
+        config=ExperimentConfig(instrument="vol"),
+    ).run()
+    assert result.summary.ticks_processed == n
+    assert result.summary.m1_candles >= 100
