@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -10,7 +9,6 @@ import pytest
 from smb.data.models import StoredTick
 from smb.data.repository import TickRepository
 from smb.data.store import ParquetTickStore
-from smb.deriv.history import Tick
 from smb.research.experiment import (
     ExperimentConfig,
     ExperimentError,
