@@ -2,9 +2,18 @@
 
 Composes existing 1C–3A components into a deterministic offline experiment:
 
-    stored ticks → replay/stream → M1/M15 candles → StrategyEngine
-         → TradeConstructor → SimulationEngine → ResearchMetrics
-         → StrategyValidationCalculator
+    stored ticks → stream → M1/M15 candles → StrategyEngine
+         → TradeConstructor → SimulationEngine semantics (via LiveSimulationSession)
+         → ResearchMetrics → StrategyValidationCalculator
+
+Tick data is streamed from the repository. Simulation uses a **single**
+chronological pass over post-signal ticks with bounded per-session buffers
+(at most the simulation horizon). The full dataset is never materialized as a
+Python list, and there is no per-signal full-history Parquet rescan.
+
+When ``ExperimentConfig.end_epoch`` is set, simulation never consumes ticks with
+``epoch >= end_epoch`` (exclusive range). SimulationEngine TIMEOUT semantics for
+truncated streams are unchanged.
 
 No new strategy, risk, simulation, or ML logic. No live/demo execution.
 """
@@ -12,12 +21,15 @@ No new strategy, risk, simulation, or ML logic. No live/demo execution.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from smb.data.repository import TickRepository
 from smb.data.store import ParquetTickStore
+from smb.deriv.history import Tick
+from smb.live.sim_session import LiveSimulationSession
 from smb.market.candles import (
     TIMEFRAME_M1,
     TIMEFRAME_M15,
@@ -26,7 +38,6 @@ from smb.market.candles import (
 )
 from smb.research.metrics import ResearchMetricsCalculator
 from smb.research.models import TradeResearchMetrics
-from smb.simulation.engine import SimulationEngine
 from smb.simulation.models import (
     SimulationConfig,
     SimulationOutcome,
@@ -182,6 +193,33 @@ def _order_finalized_pair(
     return items
 
 
+def _simulation_tick_end(
+    signal_epoch: int,
+    max_duration_seconds: int,
+    experiment_end_epoch: int | None,
+) -> int:
+    """Exclusive end bound for ticks fed into one simulation.
+
+    Horizon is inclusive through ``signal_epoch + max_duration`` in the engine.
+    The stream uses exclusive ``end_epoch`` semantics, so we pass
+    ``horizon + 1``. When the experiment sets an exclusive research
+    ``end_epoch``, ticks at or after that boundary are never supplied.
+    """
+    horizon_inclusive = signal_epoch + max_duration_seconds
+    stream_end_exclusive = horizon_inclusive + 1
+    if experiment_end_epoch is not None:
+        stream_end_exclusive = min(stream_end_exclusive, experiment_end_epoch)
+    return stream_end_exclusive
+
+
+@dataclass
+class _OpenSim:
+    candidate: TradeCandidate
+    signal: StrategySignal
+    session: LiveSimulationSession
+    metrics_ticks: list[Tick]
+
+
 class HistoricalResearchExperiment:
     """Run one offline historical experiment against a tick repository."""
 
@@ -195,13 +233,7 @@ class HistoricalResearchExperiment:
         self.config = config
 
     def run(self) -> ExperimentResult:
-        """Execute the experiment deterministically.
-
-        Raises
-        ------
-        ExperimentError
-            Invalid range, missing instrument, empty ticks, or integrity failure.
-        """
+        """Execute the experiment deterministically with streaming ticks."""
         self._validate_preconditions()
 
         ticks_processed = 0
@@ -213,7 +245,7 @@ class HistoricalResearchExperiment:
         m1_builder = CandleBuilder(TIMEFRAME_M1)
         m15_builder = CandleBuilder(TIMEFRAME_M15)
 
-        # Pass 1: stream ticks → finalized candles → strategy (no lookahead).
+        # Pass 1: stream ticks → finalized candles → strategy (no tick retention).
         for tick in self.repository.as_tick_stream(
             self.config.instrument,
             start_epoch=self.config.start_epoch,
@@ -230,7 +262,6 @@ class HistoricalResearchExperiment:
                     m1_count += 1
                     signals.extend(engine.on_m1(candle))
 
-        # Do not flush partial forming candles into strategy (no premature finalize).
         if ticks_processed == 0:
             raise ExperimentError(
                 f"no ticks for instrument={self.config.instrument!r} "
@@ -239,26 +270,15 @@ class HistoricalResearchExperiment:
 
         constructor = TradeConstructor(self.config.trade)
         risk = RiskContext(equity=self.config.risk_equity)
-        sim_engine = SimulationEngine(self.config.simulation)
         metrics_calc = ResearchMetricsCalculator()
 
-        rows: list[TradeExperimentRow] = []
-        simulations: list[TradeSimulationResult] = []
-        metrics_list: list[TradeResearchMetrics] = []
-        accepted = 0
-        rejected = 0
-        outcome_counts: dict[str, int] = {
-            SimulationOutcome.TP.value: 0,
-            SimulationOutcome.SL.value: 0,
-            SimulationOutcome.TIMEOUT.value: 0,
-            SimulationOutcome.NO_FILL.value: 0,
-        }
+        rejected_rows: list[TradeExperimentRow] = []
+        accepted: list[tuple[StrategySignal, TradeCandidate]] = []
 
         for signal in signals:
             construction = constructor.construct(signal, risk)
             if not construction.accepted or construction.trade is None:
-                rejected += 1
-                rows.append(
+                rejected_rows.append(
                     TradeExperimentRow(
                         instrument=signal.instrument,
                         signal_epoch=signal.signal_epoch,
@@ -284,28 +304,32 @@ class HistoricalResearchExperiment:
                     )
                 )
                 continue
+            accepted.append((signal, construction.trade))
 
-            accepted += 1
-            candidate = construction.trade
-            horizon_end = (
-                candidate.signal_epoch + self.config.simulation.max_duration_seconds
-            )
-            # Stream only post-signal ticks up through the horizon (inclusive).
-            tick_window = list(
-                self.repository.as_tick_stream(
-                    self.config.instrument,
-                    start_epoch=candidate.signal_epoch + 1,
-                    end_epoch=horizon_end + 1,
-                )
-            )
-            sim = sim_engine.simulate(candidate, tick_window)
+        # Pass 2: one chronological tick pass for all accepted candidates.
+        sim_by_key, metrics_by_key = self._simulate_all_streaming(
+            accepted, metrics_calc
+        )
+
+        rows: list[TradeExperimentRow] = list(rejected_rows)
+        simulations: list[TradeSimulationResult] = []
+        metrics_list: list[TradeResearchMetrics] = []
+        outcome_counts: dict[str, int] = {
+            SimulationOutcome.TP.value: 0,
+            SimulationOutcome.SL.value: 0,
+            SimulationOutcome.TIMEOUT.value: 0,
+            SimulationOutcome.NO_FILL.value: 0,
+        }
+
+        for signal, candidate in accepted:
+            key = (candidate.signal_epoch, str(candidate.direction))
+            sim = sim_by_key[key]
+            m = metrics_by_key[key]
             simulations.append(sim)
+            metrics_list.append(m)
             outcome_counts[sim.outcome.value] = (
                 outcome_counts.get(sim.outcome.value, 0) + 1
             )
-            m = metrics_calc.calculate(sim, tick_window)
-            metrics_list.append(m)
-            r_val = _realized_r(sim)
             rows.append(
                 TradeExperimentRow(
                     instrument=candidate.instrument,
@@ -322,7 +346,7 @@ class HistoricalResearchExperiment:
                     entry_time=sim.entry_time,
                     exit_time=sim.exit_time,
                     duration_seconds=sim.duration_seconds,
-                    realized_r=r_val,
+                    realized_r=_realized_r(sim),
                     mfe=m.mfe,
                     mae=m.mae,
                     signal=signal,
@@ -331,6 +355,8 @@ class HistoricalResearchExperiment:
                     metrics=m,
                 )
             )
+
+        rows.sort(key=lambda r: (r.signal_epoch, 0 if not r.accepted else 1, r.direction))
 
         validation: StrategyValidationReport | None = None
         if simulations:
@@ -361,8 +387,8 @@ class HistoricalResearchExperiment:
             m1_candles=m1_count,
             m15_candles=m15_count,
             signals=len(signals),
-            candidates_accepted=accepted,
-            candidates_rejected=rejected,
+            candidates_accepted=len(accepted),
+            candidates_rejected=len(rejected_rows),
             outcomes=outcome_counts,
             win_rate=win_rate,
             average_r=average_r,
@@ -379,6 +405,105 @@ class HistoricalResearchExperiment:
             metrics=tuple(metrics_list),
             validation=validation,
         )
+
+    def _simulate_all_streaming(
+        self,
+        accepted: Sequence[tuple[StrategySignal, TradeCandidate]],
+        metrics_calc: ResearchMetricsCalculator,
+    ) -> tuple[
+        dict[tuple[int, str], TradeSimulationResult],
+        dict[tuple[int, str], TradeResearchMetrics],
+    ]:
+        """One chronological stream; bounded per-session tick buffers (≤ horizon)."""
+        sim_by_key: dict[tuple[int, str], TradeSimulationResult] = {}
+        metrics_by_key: dict[tuple[int, str], TradeResearchMetrics] = {}
+        if not accepted:
+            return sim_by_key, metrics_by_key
+
+        pending = sorted(
+            accepted,
+            key=lambda pair: (pair[1].signal_epoch, str(pair[1].direction)),
+        )
+        max_dur = self.config.simulation.max_duration_seconds
+        exp_end = self.config.end_epoch
+
+        stream_start = min(c.signal_epoch for _, c in pending) + 1
+        stream_end = max(
+            _simulation_tick_end(c.signal_epoch, max_dur, exp_end) for _, c in pending
+        )
+
+        open_sims: list[_OpenSim] = []
+        pending_i = 0
+
+        def _activate_due(epoch: int) -> None:
+            nonlocal pending_i
+            while pending_i < len(pending):
+                signal, candidate = pending[pending_i]
+                if epoch <= candidate.signal_epoch:
+                    break
+                open_sims.append(
+                    _OpenSim(
+                        candidate=candidate,
+                        signal=signal,
+                        session=LiveSimulationSession(
+                            candidate, self.config.simulation
+                        ),
+                        metrics_ticks=[],
+                    )
+                )
+                pending_i += 1
+
+        def _close(os: _OpenSim, result: TradeSimulationResult) -> None:
+            key = (os.candidate.signal_epoch, str(os.candidate.direction))
+            m = metrics_calc.calculate(result, os.metrics_ticks)
+            sim_by_key[key] = result
+            metrics_by_key[key] = m
+
+        for tick in self.repository.as_tick_stream(
+            self.config.instrument,
+            start_epoch=stream_start,
+            end_epoch=stream_end,
+        ):
+            if exp_end is not None and tick.epoch >= exp_end:
+                break
+            _activate_due(tick.epoch)
+
+            still_open: list[_OpenSim] = []
+            for os in open_sims:
+                cand_end = _simulation_tick_end(
+                    os.candidate.signal_epoch, max_dur, exp_end
+                )
+                if tick.epoch >= cand_end:
+                    if os.session.is_open:
+                        _close(os, os.session.force_close_at_horizon())
+                    continue
+                if tick.epoch <= os.candidate.signal_epoch:
+                    still_open.append(os)
+                    continue
+
+                os.metrics_ticks.append(tick)
+                result = os.session.on_tick(tick)
+                if result is not None:
+                    _close(os, result)
+                else:
+                    still_open.append(os)
+            open_sims = still_open
+
+        for os in open_sims:
+            if os.session.is_open:
+                _close(os, os.session.force_close_at_horizon())
+
+        while pending_i < len(pending):
+            signal, candidate = pending[pending_i]
+            pending_i += 1
+            sess = LiveSimulationSession(candidate, self.config.simulation)
+            result = sess.force_close_at_horizon()
+            key = (candidate.signal_epoch, str(candidate.direction))
+            m = metrics_calc.calculate(result, ())
+            sim_by_key[key] = result
+            metrics_by_key[key] = m
+
+        return sim_by_key, metrics_by_key
 
     def _validate_preconditions(self) -> None:
         cfg = self.config
@@ -420,7 +545,7 @@ def format_summary(result: ExperimentResult) -> str:
         f"  m1_candles:           {s.m1_candles}",
         f"  m15_candles:          {s.m15_candles}",
         f"  signals:              {s.signals}",
-        f"  candidates_accepted:  {s.candidates_accepted}",
+        f"  candidates_accepted:  {s.candidates_rejected}",
         f"  candidates_rejected:  {s.candidates_rejected}",
         f"  outcomes:             {s.outcomes}",
         f"  win_rate:             {s.win_rate}",
