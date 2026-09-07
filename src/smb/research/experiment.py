@@ -245,7 +245,6 @@ class HistoricalResearchExperiment:
         m1_builder = CandleBuilder(TIMEFRAME_M1)
         m15_builder = CandleBuilder(TIMEFRAME_M15)
 
-        # Pass 1: stream ticks → finalized candles → strategy (no tick retention).
         for tick in self.repository.as_tick_stream(
             self.config.instrument,
             start_epoch=self.config.start_epoch,
@@ -306,7 +305,6 @@ class HistoricalResearchExperiment:
                 continue
             accepted.append((signal, construction.trade))
 
-        # Pass 2: one chronological tick pass for all accepted candidates.
         sim_by_key, metrics_by_key = self._simulate_all_streaming(
             accepted, metrics_calc
         )
@@ -545,7 +543,7 @@ def format_summary(result: ExperimentResult) -> str:
         f"  m1_candles:           {s.m1_candles}",
         f"  m15_candles:          {s.m15_candles}",
         f"  signals:              {s.signals}",
-        f"  candidates_accepted:  {s.candidates_rejected}",
+        f"  candidates_accepted:  {s.candidates_accepted}",
         f"  candidates_rejected:  {s.candidates_rejected}",
         f"  outcomes:             {s.outcomes}",
         f"  win_rate:             {s.win_rate}",
