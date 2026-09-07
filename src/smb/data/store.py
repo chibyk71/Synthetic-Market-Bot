@@ -13,13 +13,19 @@ Under ``root``::
 
 Rows: instrument, epoch, price, source_order.
 
-``source_order`` is assigned when each tick is **consumed from the input
-iterable/page**, before partition buffering. That preserves true source/
-ingestion order even when consecutive ticks fall into different
-year/month partitions. Dataset-level validation uses
-``LAG(epoch) OVER (ORDER BY source_order)``.
+``source_order`` is a dense integer sequence used by dataset-level ordering
+validation (``LAG(epoch) OVER (ORDER BY source_order)``).
 
-Time-range queries remain chronological (ORDER BY epoch).
+* :meth:`write_ticks` / :meth:`write_page` assign provisional ``source_order``
+  values in **input consumption order** (needed so tests can still inject
+  intentional non-monotonic sequences).
+* Historical **ingest** finishes by calling :meth:`reindex_source_order`, which
+  rewrites an instrument so ``source_order`` follows canonical chronological
+  order ``(epoch ASC, price ASC)``. That is required because Deriv pages are
+  fetched newest→oldest while each page is chronological internally; without
+  reindexing, ``source_order`` would step backward at every page boundary.
+
+Time-range queries remain chronological (``ORDER BY epoch``).
 """
 
 from __future__ import annotations
@@ -181,6 +187,59 @@ class ParquetTickStore:
         if not instrument_dir.exists():
             return []
         return sorted(instrument_dir.rglob("*.parquet"))
+
+    def reindex_source_order(self, instrument: str) -> int:
+        """Rewrite ``source_order`` into canonical chronological order.
+
+        Processes year/month partitions oldest→newest. Within each partition,
+        rows are sorted by ``(epoch ASC, price ASC)`` and given contiguous
+        ``source_order`` values continuing from the previous partition.
+
+        Memory use is bounded by the largest single partition, not the full
+        instrument history. Returns the number of rows reindexed.
+
+        Does **not** change epoch/price contents or deduplicate; call after
+        writes so validation ``ORDER BY source_order`` matches ascending epoch.
+        """
+        paths = self.partition_paths(instrument)
+        if not paths:
+            return 0
+
+        next_order = 0
+        total = 0
+        for path in paths:
+            table = pq.read_table(path)
+            table = _ensure_source_order_column(table)
+            table = table.cast(_SCHEMA)
+            # Sort chronologically; stable secondary key is price.
+            indices = pa.compute.sort_indices(
+                table,
+                sort_keys=[("epoch", "ascending"), ("price", "ascending")],
+            )
+            table = table.take(indices)
+            n = table.num_rows
+            if n == 0:
+                continue
+            orders = pa.array(range(next_order, next_order + n), type=pa.int64())
+            next_order += n
+            total += n
+            # Replace source_order column.
+            cols = {
+                name: table.column(name)
+                for name in ("instrument", "epoch", "price")
+            }
+            cols["source_order"] = orders
+            rewritten = pa.table(cols, schema=_SCHEMA)
+            pq.write_table(rewritten, path, compression="zstd")
+
+        # Provisional allocator must not continue from pre-reindex counters.
+        self._source_order_counter = None
+        logger.debug(
+            "Reindexed source_order for instrument=%s rows=%s",
+            instrument,
+            total,
+        )
+        return total
 
     def inspect(self) -> dict[str, Any]:
         from smb.data.repository import TickRepository
