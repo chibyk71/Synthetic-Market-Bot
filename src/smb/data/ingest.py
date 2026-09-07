@@ -2,6 +2,12 @@
 
 Page-by-page: each history page is persisted before the next is fetched,
 so a multi-month download never holds the full tick set in memory.
+
+Deriv ``ticks_history`` pages are requested newest→oldest (cursor =
+``earliest.epoch - 1``). Each page is chronological ascending. After all
+pages for an instrument are written, :meth:`ParquetTickStore.reindex_source_order`
+assigns dense ``source_order`` in canonical ``(epoch, price)`` order so
+dataset validation does not see false non-monotonic breaks at page boundaries.
 """
 
 from __future__ import annotations
@@ -90,8 +96,18 @@ async def ingest_instrument(
         end=end,
     ):
         pages_fetched += 1
-        stored = [StoredTick.from_tick(instrument, t) for t in page.ticks]
+        # Page ticks are chronological from Deriv; sort defensively so a
+        # single page never contributes provisional non-monotonic order.
+        stored = sorted(
+            (StoredTick.from_tick(instrument, t) for t in page.ticks),
+            key=lambda t: (t.epoch, t.price),
+        )
         ticks_written += store.write_page(stored, dedupe=dedupe)
+
+    # Pages arrived newest→oldest; provisional source_order follows that
+    # write sequence. Reindex so ORDER BY source_order is chronological.
+    if pages_fetched > 0:
+        store.reindex_source_order(instrument)
 
     logger.info(
         "Ingested %s (%s): pages=%s written=%s",

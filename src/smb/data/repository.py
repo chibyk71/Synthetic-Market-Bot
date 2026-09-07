@@ -100,9 +100,12 @@ class TickRepository:
     def coverage(self, instrument: str) -> dict[str, Any]:
         """Compute coverage stats via SQL without materialising all ticks.
 
-        ``non_monotonic_count`` counts consecutive pairs in **ingestion
-        order** (``source_order``) where epoch decreases. Sorting by epoch
-        before the check is intentionally avoided.
+        ``non_monotonic_count`` counts consecutive pairs ordered by
+        ``source_order`` where epoch decreases. After historical ingest,
+        ``source_order`` is reindexed to canonical chronological order; raw
+        ``write_ticks`` may still leave a non-chronological ``source_order``
+        so corruption remains detectable. Sorting by epoch here is
+        intentionally avoided.
         """
         instrument_dir = self.root / "ticks" / f"instrument={instrument}"
         empty = {
