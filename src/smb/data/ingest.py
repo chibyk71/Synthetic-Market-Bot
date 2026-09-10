@@ -1,13 +1,17 @@
-"""Incremental historical ingestion: Deriv history API → Parquet store.
+"""Incremental historical ingestion: Deriv history API -> Parquet store.
 
 Page-by-page: each history page is persisted before the next is fetched,
 so a multi-month download never holds the full tick set in memory.
 
-Deriv ``ticks_history`` pages are requested newest→oldest (cursor =
+Deriv ``ticks_history`` pages are requested newest->oldest (cursor =
 ``earliest.epoch - 1``). Each page is chronological ascending. After all
 pages for an instrument are written, :meth:`ParquetTickStore.reindex_source_order`
 assigns dense ``source_order`` in canonical ``(epoch, price)`` order so
 dataset validation does not see false non-monotonic breaks at page boundaries.
+
+When ``end`` is omitted (``None``), the initial cursor is chosen from the
+store: if ticks already exist, ingestion continues from ``oldest_epoch - 1``;
+otherwise it starts from ``\"latest\"``. An explicit ``end`` always wins.
 """
 
 from __future__ import annotations
@@ -31,6 +35,45 @@ class IngestResult:
     symbol: str
     pages_fetched: int
     ticks_written: int
+
+
+def resolve_ingest_end(
+    store: ParquetTickStore,
+    instrument: str,
+    end: str | int | None,
+) -> str | int:
+    """Resolve the initial Deriv history cursor for ingestion.
+
+    * Explicit ``end`` (including ``\"latest\"``) is returned unchanged.
+    * When ``end`` is ``None`` (CLI omitted ``--end``):
+      - existing ticks -> ``oldest_epoch - 1`` so the next run extends backward
+      - empty dataset -> ``\"latest\"`` (initial-ingestion behavior)
+
+    The ``- 1`` boundary avoids re-requesting the exact oldest stored tick;
+    storage still deduplicates any residual overlap.
+    """
+    if end is not None:
+        return end
+
+    from smb.data.repository import TickRepository
+
+    cov = TickRepository(store).coverage(instrument)
+    earliest = cov.get("earliest_epoch")
+    if earliest is not None and cov.get("tick_count", 0) > 0:
+        cursor = int(earliest) - 1
+        logger.info(
+            "Incremental ingest for %s: starting from oldest_epoch-1=%s (existing ticks=%s)",
+            instrument,
+            cursor,
+            cov["tick_count"],
+        )
+        return cursor
+
+    logger.info(
+        "Empty dataset for %s: starting history cursor from latest",
+        instrument,
+    )
+    return "latest"
 
 
 async def iter_history_pages(
@@ -74,16 +117,22 @@ async def ingest_instrument(
     display_name: str,
     pages: int = 3,
     count_per_page: int = MAX_TICKS_PER_REQUEST,
-    end: str | int = "latest",
+    end: str | int | None = None,
     dedupe: bool = True,
 ) -> IngestResult:
     """Fetch historical pages for one instrument and persist each page.
 
     ``instrument`` is the semantic config key (e.g. ``volatility_75_1s``).
     ``display_name`` is resolved via ``active_symbols``.
+
+    When ``end`` is ``None``, the initial cursor is chosen automatically:
+    oldest stored epoch minus one if data exists, otherwise ``\"latest\"``.
+    An explicit ``end`` (including ``\"latest\"``) always overrides.
     """
     symbols = await load_active_symbols(client, detail="full")
     info = resolve_symbol(display_name, symbols)
+
+    resolved_end = resolve_ingest_end(store, instrument, end)
 
     pages_fetched = 0
     ticks_written = 0
@@ -93,7 +142,7 @@ async def ingest_instrument(
         info.symbol,
         pages=pages,
         count_per_page=count_per_page,
-        end=end,
+        end=resolved_end,
     ):
         pages_fetched += 1
         # Page ticks are chronological from Deriv; sort defensively so a
@@ -104,7 +153,7 @@ async def ingest_instrument(
         )
         ticks_written += store.write_page(stored, dedupe=dedupe)
 
-    # Pages arrived newest→oldest; provisional source_order follows that
+    # Pages arrived newest->oldest; provisional source_order follows that
     # write sequence. Reindex so ORDER BY source_order is chronological.
     if pages_fetched > 0:
         store.reindex_source_order(instrument)

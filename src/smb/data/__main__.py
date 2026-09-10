@@ -138,6 +138,12 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         print("No instruments configured.", file=sys.stderr)
         return 1
 
+    # argparse default is None when --end is omitted so ingest can auto-detect
+    # oldest stored tick. Explicit --end (including "latest") always wins.
+    end_arg: str | int | None = args.end
+    if isinstance(end_arg, str) and end_arg.isdigit():
+        end_arg = int(end_arg)
+
     async def _run() -> int:
         url = deriv.get("websocket_url", DEFAULT_WS_URL)
         timeout = float(deriv.get("request_timeout_seconds", 30.0))
@@ -149,7 +155,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
                     instrument=key,
                     display_name=name,
                     pages=args.pages,
-                    end=args.end,
+                    end=end_arg,
                 )
                 print(
                     f"Ingested {result.instrument} ({result.symbol}): "
@@ -241,7 +247,15 @@ def main(argv: list[str] | None = None) -> int:
     p_ingest = sub.add_parser("ingest", help="Fetch and store historical ticks")
     p_ingest.add_argument("--instrument", help="Config key (default: all)")
     p_ingest.add_argument("--pages", type=int, default=3, help="Pages per instrument")
-    p_ingest.add_argument("--end", default="latest", help="End cursor (latest or epoch)")
+    p_ingest.add_argument(
+        "--end",
+        default=None,
+        help=(
+            "End cursor (latest or epoch). "
+            "When omitted, continues from oldest stored tick if data exists, "
+            "otherwise starts from latest."
+        ),
+    )
     p_ingest.set_defaults(func=cmd_ingest)
 
     p_val = sub.add_parser("validate", help="Validate stored dataset")
