@@ -7,6 +7,7 @@ Commands:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -60,6 +61,10 @@ def _trade_from_settings(settings: dict):
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    from smb.research.baseline import (
+        BaselineAnalysisCalculator,
+        format_baseline_analysis,
+    )
     from smb.research.experiment import (
         ExperimentError,
         format_summary,
@@ -97,6 +102,21 @@ def cmd_run(args: argparse.Namespace) -> int:
                 f"accepted={row.accepted} outcome={row.outcome} "
                 f"R={row.realized_r} MAE={row.mae} MFE={row.mfe}"
             )
+
+    if args.analysis or args.analysis_json:
+        report = BaselineAnalysisCalculator().analyze(result)
+        if args.analysis:
+            print()
+            print(format_baseline_analysis(report))
+        if args.analysis_json:
+            out_path = Path(args.analysis_json)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(
+                json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            print(f"Wrote analysis JSON: {out_path}", file=sys.stderr)
+
     return 0
 
 
@@ -120,6 +140,17 @@ def main(argv: list[str] | None = None) -> int:
         "--show-rows",
         action="store_true",
         help="Print per-trade research rows",
+    )
+    p_run.add_argument(
+        "--analysis",
+        action="store_true",
+        help="Print expanded Milestone 3B baseline analysis after the summary",
+    )
+    p_run.add_argument(
+        "--analysis-json",
+        default=None,
+        metavar="PATH",
+        help="Write serializable baseline analysis JSON to PATH",
     )
     p_run.set_defaults(func=cmd_run)
 
