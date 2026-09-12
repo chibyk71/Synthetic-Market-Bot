@@ -25,6 +25,7 @@ class DistributionStats:
     min: float | None
     median: float | None
     mean: float | None
+    p25: float | None
     p75: float | None
     p90: float | None
     max: float | None
@@ -88,6 +89,7 @@ def distribution(values: Sequence[float]) -> DistributionStats:
             min=None,
             median=None,
             mean=None,
+            p25=None,
             p75=None,
             p90=None,
             max=None,
@@ -99,6 +101,7 @@ def distribution(values: Sequence[float]) -> DistributionStats:
         min=ordered[0],
         median=percentile(ordered, 50.0),
         mean=mean,
+        p25=percentile(ordered, 25.0),
         p75=percentile(ordered, 75.0),
         p90=percentile(ordered, 90.0),
         max=ordered[-1],
