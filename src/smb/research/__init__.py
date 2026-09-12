@@ -1,9 +1,6 @@
-"""Milestone 2D research metrics + historical experiment harness + 3B baseline.
+"""Research metrics, historical harness, baseline analysis, and campaigns.
 
-Observer layer: MAE/MFE over simulated trades, offline composition of
-strategy → risk → simulation → validation, and baseline analytical reports.
-
-Does **not** change strategy, risk, simulation, or execution semantics.
+Observer layer only — does **not** change strategy, risk, simulation, or execution.
 """
 
 from smb.research.baseline import (
@@ -14,6 +11,15 @@ from smb.research.baseline import (
     OutcomeBreakdownRow,
     TimeoutAnalysis,
     format_baseline_analysis,
+)
+from smb.research.campaign import (
+    CampaignConfig,
+    CampaignError,
+    CampaignResults,
+    CampaignRunner,
+    CampaignSummary,
+    format_campaign_report,
+    run_campaign,
 )
 from smb.research.experiment import (
     ExperimentConfig,
@@ -40,6 +46,13 @@ __all__ = [
     "TradeExperimentRow",
     "format_summary",
     "run_experiment",
+    "CampaignConfig",
+    "CampaignError",
+    "CampaignResults",
+    "CampaignRunner",
+    "CampaignSummary",
+    "format_campaign_report",
+    "run_campaign",
     "BaselineAnalysisCalculator",
     "BaselineAnalysisReport",
     "DirectionAnalysis",
@@ -51,3 +64,23 @@ __all__ = [
     "distribution",
     "percentile",
 ]
+
+# Optional Milestone 3C exports when diagnostic module is present.
+try:
+    from smb.research.diagnostic import (  # noqa: E402
+        BaselineDiagnosticCalculator,
+        BaselineDiagnosticReport,
+        OutcomeDecomposition,
+        format_diagnostic_report,
+        sample_status,
+    )
+
+    __all__ += [
+        "BaselineDiagnosticCalculator",
+        "BaselineDiagnosticReport",
+        "OutcomeDecomposition",
+        "format_diagnostic_report",
+        "sample_status",
+    ]
+except ImportError:  # pragma: no cover
+    pass
