@@ -1,9 +1,6 @@
-"""Milestone 2D research metrics + historical experiment harness + 3B baseline.
+"""Research metrics, historical harness, baseline analysis, and diagnostics.
 
-Observer layer: MAE/MFE over simulated trades, offline composition of
-strategy → risk → simulation → validation, and baseline analytical reports.
-
-Does **not** change strategy, risk, simulation, or execution semantics.
+Observer layer only — does **not** change strategy, risk, simulation, or execution.
 """
 
 from smb.research.baseline import (
@@ -14,6 +11,13 @@ from smb.research.baseline import (
     OutcomeBreakdownRow,
     TimeoutAnalysis,
     format_baseline_analysis,
+)
+from smb.research.diagnostic import (
+    BaselineDiagnosticCalculator,
+    BaselineDiagnosticReport,
+    OutcomeDecomposition,
+    format_diagnostic_report,
+    sample_status,
 )
 from smb.research.experiment import (
     ExperimentConfig,
@@ -47,6 +51,11 @@ __all__ = [
     "OutcomeBreakdownRow",
     "TimeoutAnalysis",
     "format_baseline_analysis",
+    "BaselineDiagnosticCalculator",
+    "BaselineDiagnosticReport",
+    "OutcomeDecomposition",
+    "format_diagnostic_report",
+    "sample_status",
     "DistributionStats",
     "distribution",
     "percentile",
