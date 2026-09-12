@@ -1,7 +1,10 @@
 """CLI: python -m smb.research <command>
 
 Commands:
-  run    Run a historical research experiment on stored ticks
+  run           Run a historical research experiment on stored ticks
+  run-campaign  Run a full historical research campaign with persistent artifacts
+
+Optional flags on run: --analysis / --analysis-json, --diagnostic / --diagnostic-json
 """
 
 from __future__ import annotations
@@ -117,6 +120,75 @@ def cmd_run(args: argparse.Namespace) -> int:
             )
             print(f"Wrote analysis JSON: {out_path}", file=sys.stderr)
 
+    if args.diagnostic or args.diagnostic_json:
+        try:
+            from smb.research.diagnostic import (
+                BaselineDiagnosticCalculator,
+                format_diagnostic_report,
+            )
+        except ImportError:
+            print("Diagnostic module not available", file=sys.stderr)
+            return 0
+        diag = BaselineDiagnosticCalculator().diagnose(result)
+        if args.diagnostic:
+            print()
+            print(format_diagnostic_report(diag))
+        if args.diagnostic_json:
+            out_path = Path(args.diagnostic_json)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(
+                json.dumps(diag.to_dict(), indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            print(f"Wrote diagnostic JSON: {out_path}", file=sys.stderr)
+
+    return 0
+
+
+def cmd_run_campaign(args: argparse.Namespace) -> int:
+    """Run Milestone 5A campaign: full pipeline + persistent artifacts."""
+    from smb.research.campaign import CampaignError, format_campaign_report, run_campaign
+    from smb.simulation.models import SimulationConfig
+
+    settings = _load_settings()
+    data_root = Path(args.data_root) if args.data_root else _data_root(settings)
+    output = Path(args.output)
+    if not args.instrument:
+        print("error: --instrument is required", file=sys.stderr)
+        return 2
+
+    try:
+        results = run_campaign(
+            data_root,
+            instrument=args.instrument,
+            output_dir=output,
+            start_epoch=args.start,
+            end_epoch=args.end,
+            strategy=_strategy_from_settings(settings),
+            trade=_trade_from_settings(settings),
+            simulation=SimulationConfig(max_duration_seconds=args.max_duration),
+            risk_equity=args.equity,
+            campaign_id=args.campaign_id,
+        )
+    except CampaignError as exc:
+        print(f"Campaign error: {exc}", file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print(f"Invalid configuration: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001 — surface unexpected failures
+        print(f"Campaign failed: {exc}", file=sys.stderr)
+        return 1
+
+    print(format_campaign_report(results))
+    print(f"Artifacts written to: {results.output_dir}", file=sys.stderr)
+    print(f"  manifest:     {results.manifest_path}", file=sys.stderr)
+    print(f"  summary:      {results.summary_path}", file=sys.stderr)
+    if results.trades_path:
+        print(f"  trades:       {results.trades_path}", file=sys.stderr)
+    if results.diagnostics_path:
+        print(f"  diagnostics:  {results.diagnostics_path}", file=sys.stderr)
+    print(f"  report:       {results.report_path}", file=sys.stderr)
     return 0
 
 
@@ -152,7 +224,45 @@ def main(argv: list[str] | None = None) -> int:
         metavar="PATH",
         help="Write serializable baseline analysis JSON to PATH",
     )
+    p_run.add_argument(
+        "--diagnostic",
+        action="store_true",
+        help="Print Milestone 3C baseline diagnostic report after the summary",
+    )
+    p_run.add_argument(
+        "--diagnostic-json",
+        default=None,
+        metavar="PATH",
+        help="Write serializable baseline diagnostic JSON to PATH",
+    )
     p_run.set_defaults(func=cmd_run)
+
+    p_camp = sub.add_parser(
+        "run-campaign",
+        help="Run historical research campaign with persistent artifacts (Milestone 5A)",
+    )
+    p_camp.add_argument("--instrument", required=True, help="Config key / store instrument")
+    p_camp.add_argument(
+        "--output",
+        required=True,
+        help="Campaign output directory (manifest, summary, trades, report)",
+    )
+    p_camp.add_argument("--start", type=int, default=None, help="start_epoch inclusive")
+    p_camp.add_argument("--end", type=int, default=None, help="end_epoch exclusive")
+    p_camp.add_argument("--data-root", default=None, help="Override data root (default: config)")
+    p_camp.add_argument("--equity", type=float, default=10_000.0, help="Risk equity")
+    p_camp.add_argument(
+        "--max-duration",
+        type=int,
+        default=900,
+        help="Simulation horizon seconds after signal (default 900)",
+    )
+    p_camp.add_argument(
+        "--campaign-id",
+        default=None,
+        help="Optional explicit campaign id (default: instrument_timestamp_uuid)",
+    )
+    p_camp.set_defaults(func=cmd_run_campaign)
 
     args = parser.parse_args(argv)
     return int(args.func(args))
