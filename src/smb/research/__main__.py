@@ -2,6 +2,8 @@
 
 Commands:
   run    Run a historical research experiment on stored ticks
+
+Optional flags on run: --analysis / --analysis-json, --diagnostic / --diagnostic-json
 """
 
 from __future__ import annotations
@@ -117,6 +119,25 @@ def cmd_run(args: argparse.Namespace) -> int:
             )
             print(f"Wrote analysis JSON: {out_path}", file=sys.stderr)
 
+    if args.diagnostic or args.diagnostic_json:
+        from smb.research.diagnostic import (
+            BaselineDiagnosticCalculator,
+            format_diagnostic_report,
+        )
+
+        diag = BaselineDiagnosticCalculator().diagnose(result)
+        if args.diagnostic:
+            print()
+            print(format_diagnostic_report(diag))
+        if args.diagnostic_json:
+            out_path = Path(args.diagnostic_json)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(
+                json.dumps(diag.to_dict(), indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            print(f"Wrote diagnostic JSON: {out_path}", file=sys.stderr)
+
     return 0
 
 
@@ -151,6 +172,17 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         metavar="PATH",
         help="Write serializable baseline analysis JSON to PATH",
+    )
+    p_run.add_argument(
+        "--diagnostic",
+        action="store_true",
+        help="Print Milestone 3C baseline diagnostic report after the summary",
+    )
+    p_run.add_argument(
+        "--diagnostic-json",
+        default=None,
+        metavar="PATH",
+        help="Write serializable baseline diagnostic JSON to PATH",
     )
     p_run.set_defaults(func=cmd_run)
 
