@@ -192,6 +192,45 @@ def cmd_run_campaign(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_run_baseline_campaign(args: argparse.Namespace) -> int:
+    """Run Milestone 5B: campaign + segmented baseline analysis."""
+    from smb.research.campaign import CampaignError
+    from smb.research.campaign_baseline import (
+        format_campaign_baseline_report,
+        run_baseline_campaign,
+    )
+
+    settings = _load_settings()
+    data_root = Path(args.data_root) if args.data_root else _data_root(settings)
+    output = Path(args.output)
+
+    try:
+        results, analysis = run_baseline_campaign(
+            data_root,
+            instrument=args.instrument,
+            output_dir=output,
+            start_epoch=args.start,
+            end_epoch=args.end,
+            campaign_id=args.campaign_id,
+            risk_equity=args.equity,
+        )
+    except CampaignError as exc:
+        print(f"Campaign error: {exc}", file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print(f"Invalid configuration: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        print(f"Baseline campaign failed: {exc}", file=sys.stderr)
+        return 1
+
+    print(format_campaign_baseline_report(analysis, include_baseline_detail=False))
+    print(f"Artifacts written to: {results.output_dir}", file=sys.stderr)
+    print(f"  analysis:     {results.output_dir / 'analysis.md'}", file=sys.stderr)
+    print(f"  interpretation: {analysis.interpretation}", file=sys.stderr)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m smb.research")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -260,9 +299,30 @@ def main(argv: list[str] | None = None) -> int:
     p_camp.add_argument(
         "--campaign-id",
         default=None,
-        help="Optional explicit campaign id (default: instrument_timestamp_uuid)",
+        help="Optional campaign id (default: deterministic id from research configuration)",
     )
     p_camp.set_defaults(func=cmd_run_campaign)
+
+    p_base = sub.add_parser(
+        "run-baseline-campaign",
+        help="Run campaign + Milestone 5B baseline analysis artifacts",
+    )
+    p_base.add_argument("--instrument", required=True, help="Config key / store instrument")
+    p_base.add_argument(
+        "--output",
+        required=True,
+        help="Output directory (campaign artifacts + analysis.json/md)",
+    )
+    p_base.add_argument("--start", type=int, default=None, help="start_epoch inclusive")
+    p_base.add_argument("--end", type=int, default=None, help="end_epoch exclusive")
+    p_base.add_argument("--data-root", default=None, help="Override data root (default: config)")
+    p_base.add_argument("--equity", type=float, default=10_000.0, help="Risk equity")
+    p_base.add_argument(
+        "--campaign-id",
+        default=None,
+        help="Optional campaign id (default: deterministic id from research configuration)",
+    )
+    p_base.set_defaults(func=cmd_run_baseline_campaign)
 
     args = parser.parse_args(argv)
     return int(args.func(args))
