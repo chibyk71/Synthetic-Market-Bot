@@ -1,13 +1,15 @@
-# Milestone 5D — Expanded Historical Baseline Rerun
+# Milestone 5D - Expanded Historical Baseline Rerun
 
 ## Integrity statement
 
 **Strategy changes between 5B and 5D: none.**
 
 This report is an observational rerun of the published 5B baseline
-configuration over the expanded historical tick coverage from Milestone 5C.
+configuration over expanded historical tick coverage.
 No StrategyEngine, TradeConstructor, risk, fill, timeout, or NO_FILL
 semantics were modified.
+
+**Metrics source:** `campaign_execution` (CampaignRunner -> CampaignBaselineAnalyzer).
 
 ### Configuration identity
 
@@ -19,19 +21,19 @@ semantics were modified.
 
 - Milestone 5D is an unchanged baseline rerun over expanded historical coverage.
 - Strategy, trade construction, risk, and simulation semantics were not modified.
-- Aggregate candidate signals: 5B=15 → 5D=19.
+- 5D metrics were produced by CampaignRunner -> CampaignBaselineAnalyzer (not hard-coded constants).
+- Aggregate candidate signals: 5B=15 -> 5D=19.
 - Aggregate total R across instruments (5D): -3.0.
-- Sample remains below the 80–200 signal campaign-scale target per instrument.
-- Negative / flat total R persists; do not interpret as definitive strategy failure.
-- Instrument behavior differs (e.g. V75 MAE vs Step); do not pool blindly.
+- Instrument behavior may differ; do not pool blindly.
+- Sample remains below the 80-200 signal campaign-scale target per instrument.
 
-## Per-instrument comparison (5B → 5D)
+## Per-instrument comparison (5B -> 5D)
 
 ### volatility_75_1s
 
 - strategy_unchanged: **True**
-- 5B coverage: ~2.5–3 days (2026-09-10 → 2026-09-13 UTC)
-- 5D coverage: ~3.8 days; epochs 1788979632 → 1789309638
+- 5B coverage: ~2.5-3 days (2026-09-10 -> 2026-09-13 UTC)
+- 5D coverage: 2026-09-09 21:07:01 -> 2026-09-13 16:47:07 UTC (330,000 ticks)
 
 | Metric | 5B | 5D | Change |
 | --- | --- | --- | --- |
@@ -46,22 +48,23 @@ semantics were modified.
 | win_rate | 0.0000 | 0.0000 | +0.0000 |
 | average_r | -1.0000 | -1.0000 | +0.0000 |
 | total_r | -2.0000 | -2.0000 | +0.0000 |
-| average_mae | 6.3412 | None | — |
-| average_mfe | 14.5013 | None | — |
-| average_duration_seconds | 383.0000 | None | — |
+| average_mae | 6.3412 | 8.6850 | +2.3438 |
+| average_mfe | 14.5013 | 12.1710 | -2.3303 |
+| average_duration_seconds | 383.0000 | 482.6000 | +99.6000 |
 
 - 5D interpretation: **BASELINE INCONCLUSIVE**
 - 5D sample_scale: small_sample
+- 5D campaign_id: `milestone-5d-volatility_75_1s`
 
 ### step_index
 
 - strategy_unchanged: **True**
-- 5B coverage: ~2.5–3 days (2026-09-10 → 2026-09-13 UTC)
-- 5D coverage: ~2.9 days; epochs 1789061670 → 1789309676
+- 5B coverage: ~2.5-3 days (2026-09-10 -> 2026-09-13 UTC)
+- 5D coverage: 2026-09-10 19:22:19 -> 2026-09-13 16:49:05 UTC (250,000 ticks)
 
 | Metric | 5B | 5D | Change |
 | --- | --- | --- | --- |
-| ticks | 225000 | 248000 | +23000 |
+| ticks | 225000 | 250000 | +25000 |
 | signals | 8 | 9 | +1 |
 | accepted | 8 | 9 | +1 |
 | filled | 6 | 7 | +1 |
@@ -72,12 +75,13 @@ semantics were modified.
 | win_rate | 0.1667 | 0.1429 | -0.0238 |
 | average_r | -0.2500 | -0.2500 | +0.0000 |
 | total_r | -1.0000 | -1.0000 | +0.0000 |
-| average_mae | 1.3500 | None | — |
-| average_mfe | 1.2833 | None | — |
-| average_duration_seconds | 408.0000 | None | — |
+| average_mae | 1.3500 | 1.4000 | +0.0500 |
+| average_mfe | 1.2833 | 1.2429 | -0.0404 |
+| average_duration_seconds | 408.0000 | 470.1429 | +62.1429 |
 
 - 5D interpretation: **BASELINE INCONCLUSIVE**
 - 5D sample_scale: small_sample
+- 5D campaign_id: `milestone-5d-step_index`
 
 ## Recommendation
 
