@@ -32,6 +32,17 @@ from smb.research.campaign_baseline import (
     run_baseline_campaign,
     write_analysis_artifacts,
 )
+from smb.research.expanded_baseline import (
+    BASELINE_5B_REFERENCE,
+    ExpandedBaselineReport,
+    InstrumentExpandedComparison,
+    MetricDelta,
+    build_documented_5d_report,
+    build_expanded_baseline_report,
+    compare_instrument,
+    format_expanded_baseline_report,
+    write_expanded_baseline_artifacts,
+)
 from smb.research.experiment import (
     ExperimentConfig,
     ExperimentError,
@@ -73,6 +84,15 @@ __all__ = [
     "format_comparison_report",
     "run_baseline_campaign",
     "write_analysis_artifacts",
+    "BASELINE_5B_REFERENCE",
+    "ExpandedBaselineReport",
+    "InstrumentExpandedComparison",
+    "MetricDelta",
+    "build_documented_5d_report",
+    "build_expanded_baseline_report",
+    "compare_instrument",
+    "format_expanded_baseline_report",
+    "write_expanded_baseline_artifacts",
     "BaselineAnalysisCalculator",
     "BaselineAnalysisReport",
     "DirectionAnalysis",
@@ -87,7 +107,8 @@ __all__ = [
 
 # Optional Milestone 3C exports when diagnostic module is present.
 try:
-    from smb.research.diagnostic import (  # noqa: E402
+    from smb.research.diagnostic import  # noqa: E402
+    from smb.research.diagnostic import (
         BaselineDiagnosticCalculator,
         BaselineDiagnosticReport,
         OutcomeDecomposition,
