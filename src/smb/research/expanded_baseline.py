@@ -1,4 +1,4 @@
-"""Milestone 5D — Expanded Historical Baseline Rerun.
+"""Milestone 5D - Expanded Historical Baseline Rerun.
 
 Research/measurement only. Reruns the **unchanged** 5B baseline configuration
 over the expanded historical coverage produced by Milestone 5C.
@@ -10,10 +10,13 @@ Hard constraints
 * Do **not** tune parameters, add filters, or optimize.
 * Compare 5B vs 5D with the same configuration identity.
 
-The 5B reference metrics below are taken from the published Milestone 5B
-campaign artifacts (results/campaigns/milestone-5b/). The 5D run uses the same
-code path (CampaignRunner → CampaignBaselineAnalyzer) over expanded tick
-coverage from 5C.
+Canonical path
+--------------
+Historical ticks -> run_baseline_campaign -> CampaignBaselineAnalyzer
+  -> analysis_to_5d_metrics -> 5B comparison -> artifacts
+
+Metrics **must** come from CampaignBaselineAnalysis produced by campaign
+execution. Hard-coded prior results are not a substitute for the 5D rerun.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from typing import Any
 from smb.research.campaign_baseline import (
     CampaignBaselineAnalysis,
     SegmentMetrics,
+    run_baseline_campaign,
 )
 
 MILESTONE_5B_ID = "milestone-5b"
@@ -36,7 +40,7 @@ BASELINE_5B_REFERENCE: dict[str, dict[str, Any]] = {
     "volatility_75_1s": {
         "instrument": "volatility_75_1s",
         "ticks": 255_000,
-        "coverage_note": "~2.5–3 days (2026-09-10 → 2026-09-13 UTC)",
+        "coverage_note": "~2.5-3 days (2026-09-10 -> 2026-09-13 UTC)",
         "signals": 7,
         "accepted": 7,
         "filled": 4,
@@ -58,7 +62,7 @@ BASELINE_5B_REFERENCE: dict[str, dict[str, Any]] = {
     "step_index": {
         "instrument": "step_index",
         "ticks": 225_000,
-        "coverage_note": "~2.5–3 days (2026-09-10 → 2026-09-13 UTC)",
+        "coverage_note": "~2.5-3 days (2026-09-10 -> 2026-09-13 UTC)",
         "signals": 8,
         "accepted": 8,
         "filled": 6,
@@ -92,60 +96,9 @@ TRADE_CONFIG_IDENTITY = {
     "minimum_rr": 1.5,
     "sl_atr_buffer": 0.10,
 }
-SIMULATION_CONFIG_IDENTITY = {
-    "max_duration_seconds": 900,
-}
+SIMULATION_CONFIG_IDENTITY = {"max_duration_seconds": 900}
 
-EXPANDED_5C_METRICS: dict[str, dict[str, Any]] = {
-    "volatility_75_1s": {
-        "instrument": "volatility_75_1s",
-        "ticks": 330_000,
-        "coverage_note": "~3.8 days; epochs 1788979632 → 1789309638",
-        "signals": 10,
-        "accepted": 10,
-        "filled": 5,
-        "wins": 0,
-        "losses": 2,
-        "timeouts": 3,
-        "no_fills": 5,
-        "win_rate": 0.0,
-        "average_r": -1.0,
-        "total_r": -2.0,
-        "profit_factor": 0.0,
-        "maximum_drawdown_r": 2.0,
-        "average_mae": None,
-        "average_mfe": None,
-        "average_duration_seconds": None,
-        "interpretation": "BASELINE INCONCLUSIVE",
-        "sample_scale": "small_sample",
-        "start_epoch": 1788979632,
-        "end_epoch": 1789309638,
-    },
-    "step_index": {
-        "instrument": "step_index",
-        "ticks": 248_000,
-        "coverage_note": "~2.9 days; epochs 1789061670 → 1789309676",
-        "signals": 9,
-        "accepted": 9,
-        "filled": 7,
-        "wins": 1,
-        "losses": 3,
-        "timeouts": 3,
-        "no_fills": 2,
-        "win_rate": 0.1429,
-        "average_r": -0.25,
-        "total_r": -1.0,
-        "profit_factor": 0.6667,
-        "maximum_drawdown_r": 3.0,
-        "average_mae": None,
-        "average_mfe": None,
-        "average_duration_seconds": None,
-        "interpretation": "BASELINE INCONCLUSIVE",
-        "sample_scale": "small_sample",
-        "start_epoch": 1789061670,
-        "end_epoch": 1789309676,
-    },
-}
+DEFAULT_INSTRUMENTS = ("volatility_75_1s", "step_index")
 
 
 def _delta(a: float | int | None, b: float | int | None) -> float | int | None:
@@ -203,6 +156,7 @@ class ExpandedBaselineReport:
     comparisons: tuple[InstrumentExpandedComparison, ...]
     research_notes: tuple[str, ...]
     recommendation: str
+    source: str  # "campaign_execution"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -215,10 +169,13 @@ class ExpandedBaselineReport:
             "comparisons": [c.to_dict() for c in self.comparisons],
             "research_notes": list(self.research_notes),
             "recommendation": self.recommendation,
+            "source": self.source,
         }
 
 
-def _segment_to_metrics_dict(seg: SegmentMetrics, *, ticks: int | None = None) -> dict[str, Any]:
+def _segment_to_metrics_dict(
+    seg: SegmentMetrics, *, ticks: int | None = None
+) -> dict[str, Any]:
     return {
         "ticks": ticks,
         "signals": seg.signals,
@@ -242,11 +199,12 @@ def _segment_to_metrics_dict(seg: SegmentMetrics, *, ticks: int | None = None) -
 
 
 def analysis_to_5d_metrics(analysis: CampaignBaselineAnalysis) -> dict[str, Any]:
+    """Derive 5D metrics strictly from a live CampaignBaselineAnalysis."""
     o = analysis.overall
     d = _segment_to_metrics_dict(o, ticks=analysis.ticks_processed)
     d["interpretation"] = analysis.interpretation
     d["sample_scale"] = analysis.sample_scale
-    d["coverage_note"] = f"{analysis.start_utc} → {analysis.end_utc}"
+    d["coverage_note"] = f"{analysis.start_utc} -> {analysis.end_utc}"
     d["start_epoch"] = analysis.start_epoch
     d["end_epoch"] = analysis.end_epoch
     d["m1_candles"] = analysis.m1_candles
@@ -263,7 +221,7 @@ def compare_instrument(
 ) -> InstrumentExpandedComparison:
     ref = dict(baseline_ref or BASELINE_5B_REFERENCE.get(instrument, {}))
     if not ref:
-        raise KeyError(f"No 5B reference for instrument {instrument!r}")
+        ref = {"instrument": instrument}
 
     keys = [
         "ticks", "signals", "accepted", "filled", "wins", "losses",
@@ -293,7 +251,7 @@ def compare_instrument(
     notes = (
         "Strategy configuration identity matches published 5B (settings.toml defaults).",
         "Simulation horizon remains 900s; fill/timeout/NO_FILL semantics unchanged.",
-        "This is an observational rerun only — no parameter or logic changes.",
+        "5D metrics derived from CampaignBaselineAnalysis (campaign execution).",
     )
     return InstrumentExpandedComparison(
         instrument=instrument,
@@ -306,26 +264,24 @@ def compare_instrument(
 
 
 def build_expanded_baseline_report(
-    analyses: Sequence[CampaignBaselineAnalysis] | None = None,
-    *,
-    expanded_metrics_by_instrument: Mapping[str, Mapping[str, Any]] | None = None,
+    analyses: Sequence[CampaignBaselineAnalysis],
 ) -> ExpandedBaselineReport:
+    """Assemble 5D report from **executed** campaign analyses only."""
+    if not analyses:
+        raise ValueError(
+            "analyses must be a non-empty sequence of CampaignBaselineAnalysis"
+        )
+
     comparisons: list[InstrumentExpandedComparison] = []
     instruments: list[str] = []
-
-    if analyses:
-        for a in analyses:
-            instruments.append(a.instrument)
-            comparisons.append(compare_instrument(a.instrument, analysis_to_5d_metrics(a)))
-    elif expanded_metrics_by_instrument:
-        for inst, metrics in expanded_metrics_by_instrument.items():
-            instruments.append(inst)
-            comparisons.append(compare_instrument(inst, metrics))
-    else:
-        raise ValueError("Provide analyses or expanded_metrics_by_instrument")
+    for a in analyses:
+        instruments.append(a.instrument)
+        comparisons.append(compare_instrument(a.instrument, analysis_to_5d_metrics(a)))
 
     total_signals_5b = sum(
-        int(BASELINE_5B_REFERENCE[i]["signals"]) for i in instruments if i in BASELINE_5B_REFERENCE
+        int(BASELINE_5B_REFERENCE[i]["signals"])
+        for i in instruments
+        if i in BASELINE_5B_REFERENCE
     )
     total_signals_5d = sum(int(c.expanded_5d.get("signals") or 0) for c in comparisons)
     total_r_5d = sum(
@@ -337,14 +293,16 @@ def build_expanded_baseline_report(
     notes = (
         "Milestone 5D is an unchanged baseline rerun over expanded historical coverage.",
         "Strategy, trade construction, risk, and simulation semantics were not modified.",
-        f"Aggregate candidate signals: 5B={total_signals_5b} → 5D={total_signals_5d}.",
+        "5D metrics were produced by CampaignRunner -> CampaignBaselineAnalyzer "
+        "(not hard-coded constants).",
+        f"Aggregate candidate signals: 5B={total_signals_5b} -> 5D={total_signals_5d}.",
         f"Aggregate total R across instruments (5D): {total_r_5d}.",
-        "Sample remains below the 80–200 signal campaign-scale target per instrument.",
-        "Negative / flat total R persists; do not interpret as definitive strategy failure.",
-        "Instrument behavior differs (e.g. V75 MAE vs Step); do not pool blindly.",
+        "Instrument behavior may differ; do not pool blindly.",
     )
-
     if total_signals_5d < 80:
+        notes = notes + (
+            "Sample remains below the 80-200 signal campaign-scale target per instrument.",
+        )
         recommendation = (
             "Expanded sample still small. Continue historical coverage expansion "
             "(scheduled multi-session ingest) before any strategy diagnostic changes. "
@@ -367,21 +325,25 @@ def build_expanded_baseline_report(
         comparisons=tuple(comparisons),
         research_notes=notes,
         recommendation=recommendation,
+        source="campaign_execution",
     )
 
 
 def format_expanded_baseline_report(report: ExpandedBaselineReport) -> str:
     lines: list[str] = [
-        "# Milestone 5D — Expanded Historical Baseline Rerun",
+        "# Milestone 5D - Expanded Historical Baseline Rerun",
         "",
         "## Integrity statement",
         "",
         "**Strategy changes between 5B and 5D: none.**",
         "",
         "This report is an observational rerun of the published 5B baseline",
-        "configuration over the expanded historical tick coverage from Milestone 5C.",
+        "configuration over expanded historical tick coverage.",
         "No StrategyEngine, TradeConstructor, risk, fill, timeout, or NO_FILL",
         "semantics were modified.",
+        "",
+        f"**Metrics source:** `{report.source}` "
+        "(CampaignRunner -> CampaignBaselineAnalyzer).",
         "",
         "### Configuration identity",
         "",
@@ -394,7 +356,7 @@ def format_expanded_baseline_report(report: ExpandedBaselineReport) -> str:
     ]
     for n in report.research_notes:
         lines.append(f"- {n}")
-    lines += ["", "## Per-instrument comparison (5B → 5D)", ""]
+    lines += ["", "## Per-instrument comparison (5B -> 5D)", ""]
 
     for comp in report.comparisons:
         lines += [
@@ -414,13 +376,17 @@ def format_expanded_baseline_report(report: ExpandedBaselineReport) -> str:
             if isinstance(ch, float):
                 ch_s = f"{ch:+.4f}"
             elif ch is None:
-                ch_s = "—"
+                ch_s = "-"
             else:
                 ch_s = f"{ch:+d}" if isinstance(ch, int) else str(ch)
             lines.append(f"| {d.metric} | {b_s} | {e_s} | {ch_s} |")
         lines.append("")
-        lines.append(f"- 5D interpretation: **{comp.expanded_5d.get('interpretation', 'n/a')}**")
-        lines.append(f"- 5D sample_scale: {comp.expanded_5d.get('sample_scale', 'n/a')}")
+        lines.append(
+            f"- 5D interpretation: **{comp.expanded_5d.get('interpretation', 'n/a')}**"
+        )
+        lines.append(
+            f"- 5D sample_scale: {comp.expanded_5d.get('sample_scale', 'n/a')}"
+        )
         lines.append("")
 
     lines += [
@@ -453,8 +419,38 @@ def write_expanded_baseline_artifacts(
     return {"comparison_json": json_path, "report_md": md_path}
 
 
-def build_documented_5d_report() -> ExpandedBaselineReport:
-    """Build 5D report from published 5C expanded coverage metrics."""
-    return build_expanded_baseline_report(
-        expanded_metrics_by_instrument=EXPANDED_5C_METRICS,
-    )
+def run_expanded_baseline(
+    data_root: str | Path,
+    *,
+    instruments: Sequence[str] = DEFAULT_INSTRUMENTS,
+    output_dir: str | Path,
+    start_epoch: int | None = None,
+    end_epoch: int | None = None,
+    risk_equity: float = 10_000.0,
+) -> tuple[ExpandedBaselineReport, list[CampaignBaselineAnalysis]]:
+    """Canonical Milestone 5D entry: execute baseline campaigns then compare.
+
+    Runs CampaignRunner -> CampaignBaselineAnalyzer for each instrument against
+    the tick store, then builds the 5B->5D comparison from live analyses.
+    """
+    data_root = Path(data_root)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    analyses: list[CampaignBaselineAnalysis] = []
+    for instrument in instruments:
+        inst_out = output_dir / instrument
+        _results, analysis = run_baseline_campaign(
+            data_root,
+            instrument=instrument,
+            output_dir=inst_out,
+            start_epoch=start_epoch,
+            end_epoch=end_epoch,
+            campaign_id=f"{MILESTONE_5D_ID}-{instrument}",
+            risk_equity=risk_equity,
+        )
+        analyses.append(analysis)
+
+    report = build_expanded_baseline_report(analyses)
+    write_expanded_baseline_artifacts(report, output_dir)
+    return report, analyses
