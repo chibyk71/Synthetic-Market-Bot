@@ -1,8 +1,10 @@
 """CLI: python -m smb.research <command>
 
 Commands:
-  run           Run a historical research experiment on stored ticks
-  run-campaign  Run a full historical research campaign with persistent artifacts
+  run                    Run a historical research experiment on stored ticks
+  run-campaign           Run a full historical research campaign with persistent artifacts
+  run-baseline-campaign  Campaign + Milestone 5B baseline analysis
+  run-expanded-baseline  Milestone 5D: execute baseline on expanded data + compare to 5B
 
 Optional flags on run: --analysis / --analysis-json, --diagnostic / --diagnostic-json
 """
@@ -91,7 +93,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     except ExperimentError as exc:
         print(f"Experiment error: {exc}", file=sys.stderr)
         return 2
-    except Exception as exc:  # noqa: BLE001 — surface unexpected integration errors
+    except Exception as exc:  # noqa: BLE001
         print(f"Failed: {exc}", file=sys.stderr)
         return 1
 
@@ -176,7 +178,7 @@ def cmd_run_campaign(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"Invalid configuration: {exc}", file=sys.stderr)
         return 2
-    except Exception as exc:  # noqa: BLE001 — surface unexpected failures
+    except Exception as exc:  # noqa: BLE001
         print(f"Campaign failed: {exc}", file=sys.stderr)
         return 1
 
@@ -228,6 +230,46 @@ def cmd_run_baseline_campaign(args: argparse.Namespace) -> int:
     print(f"Artifacts written to: {results.output_dir}", file=sys.stderr)
     print(f"  analysis:     {results.output_dir / 'analysis.md'}", file=sys.stderr)
     print(f"  interpretation: {analysis.interpretation}", file=sys.stderr)
+    return 0
+
+
+def cmd_run_expanded_baseline(args: argparse.Namespace) -> int:
+    """Milestone 5D: execute unchanged baseline on expanded history and compare to 5B."""
+    from smb.research.expanded_baseline import (
+        DEFAULT_INSTRUMENTS,
+        format_expanded_baseline_report,
+        run_expanded_baseline,
+    )
+
+    settings = _load_settings()
+    data_root = Path(args.data_root) if args.data_root else _data_root(settings)
+    output = Path(args.output)
+    instruments = list(args.instruments) if args.instruments else list(DEFAULT_INSTRUMENTS)
+
+    try:
+        report, analyses = run_expanded_baseline(
+            data_root,
+            instruments=instruments,
+            output_dir=output,
+            start_epoch=args.start,
+            end_epoch=args.end,
+            risk_equity=args.equity,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"Expanded baseline failed: {exc}", file=sys.stderr)
+        return 1
+
+    print(format_expanded_baseline_report(report))
+    print(f"source={report.source}", file=sys.stderr)
+    print(f"strategy_unchanged={report.strategy_unchanged}", file=sys.stderr)
+    for a in analyses:
+        print(
+            f"  {a.instrument}: ticks={a.ticks_processed} signals={a.overall.signals} "
+            f"total_r={a.overall.total_r}",
+            file=sys.stderr,
+        )
+    print(f"Wrote {output / 'comparison.json'}", file=sys.stderr)
+    print(f"Wrote {output / 'report.md'}", file=sys.stderr)
     return 0
 
 
@@ -323,6 +365,30 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional campaign id (default: deterministic id from research configuration)",
     )
     p_base.set_defaults(func=cmd_run_baseline_campaign)
+
+    p_exp = sub.add_parser(
+        "run-expanded-baseline",
+        help=(
+            "Milestone 5D: execute unchanged 5B baseline on expanded history "
+            "and compare to published 5B reference"
+        ),
+    )
+    p_exp.add_argument(
+        "--output",
+        required=True,
+        help="Output directory (per-instrument campaign artifacts + comparison)",
+    )
+    p_exp.add_argument(
+        "--instruments",
+        nargs="+",
+        default=None,
+        help="Instrument keys (default: volatility_75_1s step_index)",
+    )
+    p_exp.add_argument("--start", type=int, default=None, help="start_epoch inclusive")
+    p_exp.add_argument("--end", type=int, default=None, help="end_epoch exclusive")
+    p_exp.add_argument("--data-root", default=None, help="Override data root (default: config)")
+    p_exp.add_argument("--equity", type=float, default=10_000.0, help="Risk equity")
+    p_exp.set_defaults(func=cmd_run_expanded_baseline)
 
     args = parser.parse_args(argv)
     return int(args.func(args))
