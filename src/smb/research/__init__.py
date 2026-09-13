@@ -21,6 +21,17 @@ from smb.research.campaign import (
     format_campaign_report,
     run_campaign,
 )
+from smb.research.campaign_baseline import (
+    CampaignBaselineAnalysis,
+    CampaignBaselineAnalyzer,
+    MultiInstrumentComparison,
+    SegmentMetrics,
+    compare_instruments,
+    format_campaign_baseline_report,
+    format_comparison_report,
+    run_baseline_campaign,
+    write_analysis_artifacts,
+)
 from smb.research.experiment import (
     ExperimentConfig,
     ExperimentError,
@@ -53,6 +64,15 @@ __all__ = [
     "CampaignSummary",
     "format_campaign_report",
     "run_campaign",
+    "CampaignBaselineAnalysis",
+    "CampaignBaselineAnalyzer",
+    "MultiInstrumentComparison",
+    "SegmentMetrics",
+    "compare_instruments",
+    "format_campaign_baseline_report",
+    "format_comparison_report",
+    "run_baseline_campaign",
+    "write_analysis_artifacts",
     "BaselineAnalysisCalculator",
     "BaselineAnalysisReport",
     "DirectionAnalysis",
