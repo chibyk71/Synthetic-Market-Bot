@@ -119,6 +119,9 @@ class TickRepository:
         }
         if not instrument_dir.exists():
             return empty
+        # Empty partition tree (no parquet yet) must not raise via DuckDB.
+        if not any(instrument_dir.rglob("*.parquet")):
+            return empty
 
         pattern = str(instrument_dir / "**" / "*.parquet")
         con = duckdb.connect()
