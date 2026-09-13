@@ -15,11 +15,11 @@ repository (same contract as :class:`~smb.research.experiment.HistoricalResearch
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
 import subprocess
-import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -154,6 +154,7 @@ class CampaignResults:
     trades_path: Path | None
     diagnostics_path: Path | None
     report_path: Path
+    diagnostics_status: str  # "complete" | "unavailable" | "skipped"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -167,6 +168,7 @@ class CampaignResults:
                 str(self.diagnostics_path) if self.diagnostics_path else None
             ),
             "report_path": str(self.report_path),
+            "diagnostics_status": self.diagnostics_status,
         }
 
 
@@ -426,6 +428,7 @@ def format_campaign_report(results: CampaignResults) -> str:
         f"- average duration (s): {s.average_duration_seconds}",
         "",
         f"- empty campaign: {s.empty}",
+        f"- diagnostics: {results.diagnostics_status}",
     ]
     return "\n".join(lines) + "\n"
 
@@ -450,7 +453,12 @@ class CampaignRunner:
         self.config = config
 
     def run(self) -> CampaignResults:
-        """Execute the campaign and write artifacts under ``config.output_dir``."""
+        """Execute the campaign and write artifacts under ``config.output_dir``.
+
+        Genuine data/configuration failures (missing instrument, corrupt ticks,
+        invalid range, etc.) raise :class:`CampaignError`. A successful run
+        with zero signals is a legitimate empty campaign.
+        """
         cfg = self.config
         campaign_id = cfg.campaign_id or _default_campaign_id(cfg)
         out = Path(cfg.output_dir)
@@ -466,22 +474,36 @@ class CampaignRunner:
             risk_equity=cfg.risk_equity,
         )
 
-        experiment: ExperimentResult | None = None
-        summary: CampaignSummary
-
         try:
             experiment = HistoricalResearchExperiment(
                 self.repository, config=exp_cfg
             ).run()
-            summary = _summary_from_experiment(campaign_id, cfg, experiment)
         except ExperimentError as exc:
-            # Expected data conditions: empty range, missing instrument coverage, etc.
-            logger.info("Campaign produced empty/partial result: %s", exc)
-            summary = _empty_summary(campaign_id, cfg)
-            # Attach message for manifest
-            empty_reason = str(exc)
+            # Do not convert configuration / data-integrity errors into empty
+            # campaigns — that would silently poison research conclusions.
+            raise CampaignError(str(exc)) from exc
+
+        summary = _summary_from_experiment(campaign_id, cfg, experiment)
+
+        # Diagnostics: unavailable vs complete vs hard failure
+        diagnostics_path: Path | None = None
+        if _DiagCalc is None:
+            diagnostics_status = "unavailable"
         else:
-            empty_reason = None
+            try:
+                diag = _DiagCalc().diagnose(experiment)
+                diagnostics_path = out / "diagnostics.json"
+                diagnostics_path.write_text(
+                    json.dumps(diag.to_dict(), indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                diagnostics_status = "complete"
+            except Exception as exc:  # noqa: BLE001
+                # 3C is installed but failed — treat as campaign failure so
+                # silent diagnostic loss cannot masquerade as success.
+                raise CampaignError(
+                    f"diagnostics failed (Milestone 3C): {exc}"
+                ) from exc
 
         # Artifacts
         manifest = {
@@ -492,7 +514,7 @@ class CampaignRunner:
             "end_epoch": cfg.end_epoch,
             "configuration": _config_to_dict(cfg),
             "git_commit": _git_commit(),
-            "empty_reason": empty_reason,
+            "diagnostics_status": diagnostics_status,
             "pipeline": [
                 "ticks",
                 "candles",
@@ -516,26 +538,8 @@ class CampaignRunner:
             encoding="utf-8",
         )
 
-        trades_path: Path | None = None
-        if experiment is not None and experiment.rows:
-            trades_path = out / "trades.parquet"
-            _write_trades_parquet(trades_path, experiment.rows)
-        elif experiment is not None:
-            # Explicit empty parquet for reproducibility
-            trades_path = out / "trades.parquet"
-            _write_trades_parquet(trades_path, ())
-
-        diagnostics_path: Path | None = None
-        if experiment is not None and _DiagCalc is not None:
-            try:
-                diag = _DiagCalc().diagnose(experiment)
-                diagnostics_path = out / "diagnostics.json"
-                diagnostics_path.write_text(
-                    json.dumps(diag.to_dict(), indent=2, sort_keys=True) + "\n",
-                    encoding="utf-8",
-                )
-            except Exception as exc:  # noqa: BLE001 — diagnostics are best-effort
-                logger.warning("Diagnostics skipped: %s", exc)
+        trades_path = out / "trades.parquet"
+        _write_trades_parquet(trades_path, experiment.rows if experiment.rows else ())
 
         results = CampaignResults(
             config=cfg,
@@ -548,15 +552,30 @@ class CampaignRunner:
             trades_path=trades_path,
             diagnostics_path=diagnostics_path,
             report_path=out / "report.md",
+            diagnostics_status=diagnostics_status,
         )
         results.report_path.write_text(format_campaign_report(results), encoding="utf-8")
         return results
 
 
 def _default_campaign_id(cfg: CampaignConfig) -> str:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    short = uuid.uuid4().hex[:8]
-    return f"{cfg.instrument}_{stamp}_{short}"
+    """Deterministic identity from research configuration (not run metadata).
+
+    Same instrument + range + strategy/trade/simulation/risk config → same ID.
+    ``created_at_utc`` remains run metadata and is *not* part of identity.
+    """
+    payload = {
+        "instrument": cfg.instrument,
+        "start_epoch": cfg.start_epoch,
+        "end_epoch": cfg.end_epoch,
+        "risk_equity": cfg.risk_equity,
+        "strategy": asdict(cfg.strategy),
+        "trade": asdict(cfg.trade),
+        "simulation": asdict(cfg.simulation),
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+    return f"{cfg.instrument}_{digest}"
 
 
 def run_campaign(
