@@ -107,8 +107,7 @@ __all__ = [
 
 # Optional Milestone 3C exports when diagnostic module is present.
 try:
-    from smb.research.diagnostic import  # noqa: E402
-    from smb.research.diagnostic import (
+    from smb.research.diagnostic import (  # noqa: E402
         BaselineDiagnosticCalculator,
         BaselineDiagnosticReport,
         OutcomeDecomposition,
