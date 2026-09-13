@@ -21,7 +21,6 @@ from smb.research.campaign_baseline import (
     run_baseline_campaign,
     write_analysis_artifacts,
 )
-from smb.research.experiment import TradeExperimentRow
 from smb.simulation.models import SimulationOutcome
 
 
