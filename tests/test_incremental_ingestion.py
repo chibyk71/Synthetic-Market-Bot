@@ -477,6 +477,46 @@ async def test_start_epoch_stops_backward_walk(store: ParquetTickStore):
 
 
 @pytest.mark.asyncio
+async def test_start_epoch_filters_boundary_crossing_page(store: ParquetTickStore):
+    """Boundary-crossing page: only ticks with epoch >= start_epoch are stored."""
+    # Single page mixes ticks below and at/above the inclusive lower bound.
+    page = HistoryPage(
+        symbol="1HZ75V",
+        ticks=(_tick(999, 9.9), _tick(1000, 10.0), _tick(1001, 10.1)),
+        pip_size=0.01,
+    )
+
+    async def fake_fetch(client, symbol, *, count, end, start=1):
+        return page
+
+    client = AsyncMock()
+    with pytest.MonkeyPatch.context() as mp:
+        _patch_symbol_and_fetch(mp, fake_fetch)
+        result = await ingest_instrument(
+            client,
+            store,
+            instrument="vol",
+            display_name="X",
+            pages=1,
+            end="latest",
+            start_epoch=1000,
+            write_manifest=False,
+        )
+
+    assert result.pages_fetched == 1
+    assert result.ticks_received == 3
+    assert result.ticks_written == 2
+    cov = TickRepository(store).coverage("vol")
+    assert cov["tick_count"] == 2
+    assert cov["earliest_epoch"] == 1000
+    assert cov["latest_epoch"] == 1001
+    assert cov["duplicate_count"] == 0
+
+    epochs = [t.epoch for t in TickRepository(store).get_ticks("vol")]
+    assert epochs == [1000, 1001]
+
+
+@pytest.mark.asyncio
 async def test_idempotent_double_ingest(store: ParquetTickStore):
     """Running the same ingestion twice does not duplicate ticks."""
     page = HistoryPage(
