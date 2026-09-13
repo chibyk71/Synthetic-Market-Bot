@@ -1,0 +1,32 @@
+{
+  "average_duration_seconds": 482.6,
+  "average_mae": 8.685000000000036,
+  "average_mfe": 12.171000000000276,
+  "average_r": -1.0,
+  "campaign_id": "milestone-5d-volatility_75_1s",
+  "candidates_accepted": 10,
+  "candidates_rejected": 0,
+  "completed_simulations": 10,
+  "cumulative_r": -2.0,
+  "empty": false,
+  "end_epoch": null,
+  "instrument": "volatility_75_1s",
+  "loss_count": 2,
+  "m15_candles": 367,
+  "m1_candles": 5500,
+  "maximum_drawdown_r": 2.0,
+  "no_fill_count": 5,
+  "outcomes": {
+    "no_fill": 5,
+    "sl": 2,
+    "timeout": 3,
+    "tp": 0
+  },
+  "profit_factor": 0.0,
+  "signals": 10,
+  "start_epoch": null,
+  "ticks_processed": 330000,
+  "timeout_count": 3,
+  "win_count": 0,
+  "win_rate": 0.0
+}
