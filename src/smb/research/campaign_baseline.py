@@ -15,7 +15,7 @@ import json
 import math
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -26,14 +26,11 @@ from smb.research.baseline import (
     format_baseline_analysis,
 )
 from smb.research.campaign import (
-    CampaignConfig,
     CampaignResults,
-    CampaignRunner,
-    CampaignSummary,
     _maximum_drawdown_r,
     _profit_factor,
 )
-from smb.research.experiment import ExperimentResult, TradeExperimentRow
+from smb.research.experiment import TradeExperimentRow
 from smb.simulation.models import SimulationOutcome
 
 InterpretationLabel = Literal[
@@ -565,7 +562,7 @@ def format_campaign_baseline_report(
             f"- No-fill rate is material ({o.no_fills}/{o.accepted} accepted); "
             "usable frequency is reduced before performance is measured."
         )
-    if not any(l.startswith("- ") for l in lines[-6:]):
+    if not any(line.startswith("- ") for line in lines[-6:]):
         lines.append("- No single dominant failure mode flagged by simple heuristics.")
 
     lines += [
