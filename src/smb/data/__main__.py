@@ -144,6 +144,8 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     if isinstance(end_arg, str) and end_arg.isdigit():
         end_arg = int(end_arg)
 
+    start_arg: int | None = getattr(args, "start", None)
+
     async def _run() -> int:
         url = deriv.get("websocket_url", DEFAULT_WS_URL)
         timeout = float(deriv.get("request_timeout_seconds", 30.0))
@@ -155,12 +157,33 @@ def cmd_ingest(args: argparse.Namespace) -> int:
                     instrument=key,
                     display_name=name,
                     pages=args.pages,
+                    count_per_page=getattr(args, "count_per_page", 1000),
                     end=end_arg,
+                    start_epoch=start_arg,
+                    max_retries=getattr(args, "retries", 3),
+                    write_manifest=not getattr(args, "no_manifest", False),
                 )
+                cov = result.coverage_after
                 print(
                     f"Ingested {result.instrument} ({result.symbol}): "
-                    f"pages={result.pages_fetched} written={result.ticks_written}"
+                    f"pages={result.pages_fetched} "
+                    f"received={result.ticks_received} "
+                    f"written={result.ticks_written} "
+                    f"dup_skipped={result.duplicates_skipped} "
+                    f"retries={result.retries}"
                 )
+                if cov.get("tick_count"):
+                    print(
+                        f"  coverage: ticks={cov['tick_count']} "
+                        f"earliest={cov.get('earliest_epoch')} "
+                        f"latest={cov.get('latest_epoch')}"
+                    )
+                if result.manifest_path:
+                    print(f"  manifest: {result.manifest_path}")
+                if result.errors:
+                    for err in result.errors:
+                        print(f"  error: {err}", file=sys.stderr)
+                    return 1
         return 0
 
     return asyncio.run(_run())
@@ -246,7 +269,18 @@ def main(argv: list[str] | None = None) -> int:
 
     p_ingest = sub.add_parser("ingest", help="Fetch and store historical ticks")
     p_ingest.add_argument("--instrument", help="Config key (default: all)")
-    p_ingest.add_argument("--pages", type=int, default=3, help="Pages per instrument")
+    p_ingest.add_argument(
+        "--pages",
+        type=int,
+        default=3,
+        help="Max history pages per instrument (each page \u22641000 ticks)",
+    )
+    p_ingest.add_argument(
+        "--count-per-page",
+        type=int,
+        default=1000,
+        help="Ticks requested per page (capped at 1000 by Deriv API)",
+    )
     p_ingest.add_argument(
         "--end",
         default=None,
@@ -255,6 +289,26 @@ def main(argv: list[str] | None = None) -> int:
             "When omitted, continues from oldest stored tick if data exists, "
             "otherwise starts from latest."
         ),
+    )
+    p_ingest.add_argument(
+        "--start",
+        type=int,
+        default=None,
+        help=(
+            "Optional inclusive lower epoch bound. Backward pagination stops "
+            "once a page's earliest tick is at or below this value."
+        ),
+    )
+    p_ingest.add_argument(
+        "--retries",
+        type=int,
+        default=3,
+        help="Max retries per page on transient API/network failures",
+    )
+    p_ingest.add_argument(
+        "--no-manifest",
+        action="store_true",
+        help="Do not write ingest_manifests/*.json under the data root",
     )
     p_ingest.set_defaults(func=cmd_ingest)
 
