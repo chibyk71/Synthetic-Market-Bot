@@ -15,7 +15,8 @@ otherwise it starts from ``\"latest\"``. An explicit ``end`` always wins.
 
 Optional ``start_epoch`` stops backward pagination once the page's earliest
 tick is at or below that bound (inclusive stop). Overlapping boundary ticks
-are deduplicated by the store.
+are deduplicated by the store. Ticks strictly older than ``start_epoch`` on a
+boundary-crossing page are not persisted.
 
 Each run can write an :class:`IngestManifest` JSON under the data root for
 audit/resume provenance. Transient API failures are retried with exponential
@@ -283,7 +284,7 @@ async def ingest_instrument(
     An explicit ``end`` (including ``\"latest\"``) always overrides.
 
     ``start_epoch`` optionally stops backward walk once coverage reaches that
-    inclusive lower bound.
+    inclusive lower bound. Ticks with ``epoch < start_epoch`` are not persisted.
     """
     started = _utc_now()
     t0 = time.monotonic()
@@ -315,10 +316,17 @@ async def ingest_instrument(
             pages_fetched += 1
             retries_total += retries
             ticks_received += page.count
+            # Inclusive lower bound: drop ticks older than start_epoch even when
+            # they arrive on the final (boundary-crossing) page.
+            page_ticks = (
+                StoredTick.from_tick(instrument, t)
+                for t in page.ticks
+                if start_epoch is None or t.epoch >= start_epoch
+            )
             # Page ticks are chronological from Deriv; sort defensively so a
             # single page never contributes provisional non-monotonic order.
             stored = sorted(
-                (StoredTick.from_tick(instrument, t) for t in page.ticks),
+                page_ticks,
                 key=lambda t: (t.epoch, t.price),
             )
             written = store.write_page(stored, dedupe=dedupe)
