@@ -142,3 +142,4 @@ cython_debug/
 
 # Local historical samples (probe)
 data/
+results/
