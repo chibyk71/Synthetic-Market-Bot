@@ -6,6 +6,7 @@ supplied campaign analysis data (no hard-coded 5D metrics).
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -425,3 +426,65 @@ def test_no_hardcoded_5d_values_in_module_source() -> None:
 def test_analyze_rejects_empty_analyses() -> None:
     with pytest.raises(ValueError, match="non-empty"):
         BaselineDiagnosticAnalyzer().analyze([])
+
+
+# ---------------------------------------------------------------------------
+# CampaignRunner construction regression (5F CLI orchestration)
+# ---------------------------------------------------------------------------
+
+
+def test_run_baseline_diagnostics_does_not_call_campaign_runner_without_deps() -> None:
+    """Regression: CampaignRunner requires repository + config.
+
+    The original 5F CLI used ``CampaignRunner()`` and ``runner.run(cfg, ...)``,
+    which raises TypeError before any campaign can execute.
+    """
+    from pathlib import Path
+
+    src = Path("src/smb/research/diagnostic_analysis.py").read_text()
+    assert "CampaignRunner()" not in src
+    assert "run_campaign(" in src
+
+
+def test_run_baseline_diagnostics_executes_campaign_path(
+    tmp_path: Path,
+) -> None:
+    """End-to-end: run_baseline_diagnostics must reach campaign execution.
+
+    Uses a flat tick series (zero signals is a legitimate empty campaign).
+    Must not raise TypeError about missing CampaignRunner constructor args.
+    """
+    from smb.data.models import StoredTick
+    from smb.data.store import ParquetTickStore
+    from smb.research.diagnostic_analysis import run_baseline_diagnostics
+
+    data_root = tmp_path / "data"
+    store = ParquetTickStore(data_root)
+    instrument = "volatility_75_1s"
+    # ~2 hours of 1s ticks — enough for candle builders; strategy may yield 0 signals
+    base = 1_700_000_000
+    ticks = [
+        StoredTick(instrument=instrument, epoch=base + i, price=100.0)
+        for i in range(7200)
+    ]
+    store.write_ticks(ticks)
+    store.reindex_source_order(instrument)
+
+    out = tmp_path / "milestone-5f"
+    report = run_baseline_diagnostics(
+        data_root=data_root,
+        output=out,
+        instruments=[instrument],
+        equity=10_000.0,
+    )
+
+    assert report.source == "campaign_execution"
+    assert (out / "diagnostic.json").is_file()
+    assert (out / "report.md").is_file()
+    # configuration identity records frozen baseline defaults
+    cfg = report.configuration_identity
+    assert cfg.get("strategy", {}).get("swing_x") == 2
+    assert cfg.get("trade", {}).get("target_rr") == 2.0
+    assert cfg.get("simulation", {}).get("max_duration_seconds") == 900
+    # metrics derived from this run, not hard-coded 5D numbers
+    assert report.overall_metrics.total_signals != 148

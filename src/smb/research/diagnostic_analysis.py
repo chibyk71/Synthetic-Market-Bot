@@ -581,48 +581,72 @@ def run_baseline_diagnostics(
     equity: float = 10_000.0,
     configuration_identity: Mapping[str, Any] | None = None,
 ) -> BaselineDiagnosticReport:
-    from smb.research.campaign import CampaignConfig, CampaignRunner
+    """Execute frozen-baseline campaigns then diagnostic analysis; write artifacts.
+
+    Canonical path (matches Milestone 5B/5D)::
+
+        ParquetTickStore / TickRepository
+                ↓
+        CampaignRunner(repository, CampaignConfig)
+                ↓
+        CampaignBaselineAnalyzer (via analyze_from_campaign_results)
+                ↓
+        BaselineDiagnosticAnalyzer
+                ↓
+        diagnostic.json + report.md
+
+    Strategy / trade / simulation configs are the repository defaults
+    (:class:`~smb.strategy.models.StrategyConfig`,
+    :class:`~smb.trade.models.TradeConfig`,
+    :class:`~smb.simulation.models.SimulationConfig`) — the frozen baseline.
+    """
+    from smb.research.campaign import run_campaign
     from smb.simulation.models import SimulationConfig
     from smb.strategy.models import StrategyConfig
     from smb.trade.models import TradeConfig
 
     data_root = Path(data_root)
     output = Path(output)
-    runner = CampaignRunner()
+
+    # Frozen baseline identity — same defaults used by 5B/5D campaign entry points.
+    strategy = StrategyConfig()
+    trade = TradeConfig()
+    simulation = SimulationConfig()
+
     results_list = []
     for inst in instruments:
-        cfg = CampaignConfig(
-            instrument=inst,
-            start_epoch=start_epoch,
-            end_epoch=end_epoch,
-            strategy=StrategyConfig(),
-            trade=TradeConfig(),
-            simulation=SimulationConfig(),
-            risk_equity=equity,
-            output_dir=str(output / inst),
-            campaign_id=f"milestone-5f-{inst}",
+        results_list.append(
+            run_campaign(
+                data_root,
+                instrument=inst,
+                output_dir=output / inst,
+                start_epoch=start_epoch,
+                end_epoch=end_epoch,
+                strategy=strategy,
+                trade=trade,
+                simulation=simulation,
+                risk_equity=equity,
+                campaign_id=f"milestone-5f-{inst}",
+            )
         )
-        results_list.append(runner.run(cfg, data_root=data_root))
 
     cfg_id = dict(configuration_identity or {})
     if not cfg_id:
-        tc = TradeConfig()
-        sc = SimulationConfig()
         cfg_id = {
             "strategy": {
-                "swing_x": StrategyConfig().swing_x,
-                "msb_window_bars": StrategyConfig().msb_window_bars,
-                "displacement_body_range_ratio": StrategyConfig().displacement_body_range_ratio,
-                "displacement_body_atr_ratio": StrategyConfig().displacement_body_atr_ratio,
-                "atr_period": StrategyConfig().atr_period,
+                "swing_x": strategy.swing_x,
+                "msb_window_bars": strategy.msb_window_bars,
+                "displacement_body_range_ratio": strategy.displacement_body_range_ratio,
+                "displacement_body_atr_ratio": strategy.displacement_body_atr_ratio,
+                "atr_period": strategy.atr_period,
             },
             "trade": {
-                "risk_per_trade": tc.risk_per_trade,
-                "target_rr": tc.target_rr,
-                "minimum_rr": tc.minimum_rr,
-                "sl_atr_buffer": tc.sl_atr_buffer,
+                "risk_per_trade": trade.risk_per_trade,
+                "target_rr": trade.target_rr,
+                "minimum_rr": trade.minimum_rr,
+                "sl_atr_buffer": trade.sl_atr_buffer,
             },
-            "simulation": {"max_duration_seconds": sc.max_duration_seconds},
+            "simulation": {"max_duration_seconds": simulation.max_duration_seconds},
         }
 
     report = BaselineDiagnosticAnalyzer().analyze_from_campaign_results(
