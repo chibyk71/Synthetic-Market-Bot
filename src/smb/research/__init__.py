@@ -107,22 +107,28 @@ __all__ = [
     "percentile",
 ]
 
-# Optional Milestone 3C exports when diagnostic module is present.
-try:
-    from smb.research.diagnostic import (  # noqa: E402
-        BaselineDiagnosticCalculator,
-        BaselineDiagnosticReport,
-        OutcomeDecomposition,
-        format_diagnostic_report,
-        sample_status,
-    )
+from smb.research.diagnostic_analysis import (
+    BaselineDiagnosticAnalyzer,
+    BaselineDiagnosticReport,
+    FailureModeEntry,
+    InstrumentDiagnostic,
+    OutcomeDistribution,
+    format_diagnostic_report,
+    run_baseline_diagnostics,
+    sample_size_class,
+    sample_size_warning,
+    write_diagnostic_artifacts,
+)
 
-    __all__ += [
-        "BaselineDiagnosticCalculator",
-        "BaselineDiagnosticReport",
-        "OutcomeDecomposition",
-        "format_diagnostic_report",
-        "sample_status",
-    ]
-except ImportError:  # pragma: no cover
-    pass
+__all__ += [
+    "BaselineDiagnosticAnalyzer",
+    "BaselineDiagnosticReport",
+    "FailureModeEntry",
+    "InstrumentDiagnostic",
+    "OutcomeDistribution",
+    "format_diagnostic_report",
+    "run_baseline_diagnostics",
+    "sample_size_class",
+    "sample_size_warning",
+    "write_diagnostic_artifacts",
+]

@@ -5,6 +5,7 @@ Commands:
   run-campaign           Run a full historical research campaign with persistent artifacts
   run-baseline-campaign  Campaign + Milestone 5B baseline analysis
   run-expanded-baseline  Milestone 5D: execute baseline on expanded data + compare to 5B
+  run-baseline-diagnostics  Milestone 5F: structured baseline diagnostic research
 
 Optional flags on run: --analysis / --analysis-json, --diagnostic / --diagnostic-json
 """
@@ -273,6 +274,35 @@ def cmd_run_expanded_baseline(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_run_baseline_diagnostics(args: argparse.Namespace) -> int:
+    """Milestone 5F: CampaignRunner -> diagnostic analysis artifacts."""
+    from smb.research.diagnostic_analysis import run_baseline_diagnostics
+
+    settings = _load_settings()
+    data_root = Path(args.data_root) if args.data_root else _data_root(settings)
+    instruments = args.instruments or ["volatility_75_1s", "step_index"]
+    try:
+        report = run_baseline_diagnostics(
+            data_root=data_root,
+            output=args.output,
+            instruments=instruments,
+            start_epoch=args.start,
+            end_epoch=args.end,
+            equity=args.equity,
+        )
+    except Exception as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    o = report.overall_metrics
+    print(
+        f"diagnostic complete: signals={o.total_signals} filled={o.filled} "
+        f"TP={o.tp} SL={o.sl} TIMEOUT={o.timeout} NO_FILL={o.no_fill} "
+        f"avgR={report.r_metrics.average_r} totalR={report.r_metrics.total_r}"
+    )
+    print(f"artifacts: {args.output}/diagnostic.json , {args.output}/report.md")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m smb.research")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -389,6 +419,27 @@ def main(argv: list[str] | None = None) -> int:
     p_exp.add_argument("--data-root", default=None, help="Override data root (default: config)")
     p_exp.add_argument("--equity", type=float, default=10_000.0, help="Risk equity")
     p_exp.set_defaults(func=cmd_run_expanded_baseline)
+
+    p_diag = sub.add_parser(
+        "run-baseline-diagnostics",
+        help="Milestone 5F: structured baseline diagnostic research (frozen strategy)",
+    )
+    p_diag.add_argument(
+        "--output",
+        required=True,
+        help="Output directory (diagnostic.json + report.md)",
+    )
+    p_diag.add_argument(
+        "--instruments",
+        nargs="+",
+        default=None,
+        help="Instrument keys (default: volatility_75_1s step_index)",
+    )
+    p_diag.add_argument("--start", type=int, default=None, help="start_epoch inclusive")
+    p_diag.add_argument("--end", type=int, default=None, help="end_epoch exclusive")
+    p_diag.add_argument("--data-root", default=None, help="Override data root")
+    p_diag.add_argument("--equity", type=float, default=10_000.0, help="Risk equity")
+    p_diag.set_defaults(func=cmd_run_baseline_diagnostics)
 
     args = parser.parse_args(argv)
     return int(args.func(args))
