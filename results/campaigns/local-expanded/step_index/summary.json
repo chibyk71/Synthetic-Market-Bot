@@ -1,0 +1,32 @@
+{
+  "average_duration_seconds": 523.7647058823529,
+  "average_mae": 1.5897058823529733,
+  "average_mfe": 1.4661764705882996,
+  "average_r": -0.75,
+  "campaign_id": "milestone-5d-step_index",
+  "candidates_accepted": 59,
+  "candidates_rejected": 0,
+  "completed_simulations": 59,
+  "cumulative_r": -9.0,
+  "empty": false,
+  "end_epoch": null,
+  "instrument": "step_index",
+  "loss_count": 11,
+  "m15_candles": 2309,
+  "m1_candles": 34633,
+  "maximum_drawdown_r": 9.0,
+  "no_fill_count": 25,
+  "outcomes": {
+    "no_fill": 25,
+    "sl": 11,
+    "timeout": 22,
+    "tp": 1
+  },
+  "profit_factor": 0.18181818181818182,
+  "signals": 59,
+  "start_epoch": null,
+  "ticks_processed": 2078000,
+  "timeout_count": 22,
+  "win_count": 1,
+  "win_rate": 0.029411764705882353
+}

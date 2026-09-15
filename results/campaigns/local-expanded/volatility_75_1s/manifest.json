@@ -1,0 +1,44 @@
+{
+  "campaign_id": "milestone-5d-volatility_75_1s",
+  "configuration": {
+    "campaign_id": "milestone-5d-volatility_75_1s",
+    "data_root": "C:\\Users\\user\\Documents\\projects\\Synthetic-Market-Bot\\data",
+    "end_epoch": null,
+    "instrument": "volatility_75_1s",
+    "output_dir": "results\\campaigns\\local-expanded\\volatility_75_1s",
+    "risk_equity": 10000.0,
+    "simulation": {
+      "max_duration_seconds": 900
+    },
+    "start_epoch": null,
+    "strategy": {
+      "atr_period": 14,
+      "displacement_body_atr_ratio": 0.8,
+      "displacement_body_range_ratio": 0.6,
+      "msb_window_bars": 3,
+      "swing_x": 2
+    },
+    "trade": {
+      "minimum_rr": 1.5,
+      "risk_per_trade": 0.01,
+      "sl_atr_buffer": 0.1,
+      "target_rr": 2.0
+    }
+  },
+  "created_at_utc": "2026-09-14T18:31:47.248997+00:00",
+  "diagnostics_status": "unavailable",
+  "end_epoch": null,
+  "git_commit": "50b0850b8da0e1416e95d0701387f86913e9c8b6",
+  "instrument": "volatility_75_1s",
+  "pipeline": [
+    "ticks",
+    "candles",
+    "strategy",
+    "trade_construction",
+    "simulation",
+    "research_metrics",
+    "strategy_validation",
+    "diagnostics"
+  ],
+  "start_epoch": null
+}
