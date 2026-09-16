@@ -284,7 +284,7 @@ class TestUnivariate:
             mae=r0.mae,
             duration_seconds=r0.duration_seconds,
             risk_distance=r0.risk_distance,
-            reward_distance=r0.reward_distance,
+            reward_distance=r0.risk_reward,
             risk_reward=r0.risk_reward,
             filled=r0.filled,
         )
@@ -372,8 +372,9 @@ class TestChronologicalModel:
             # With zero train positives, predicted probs should not favor class 1
             # (constant model uses p=0; RF with single class also collapses)
             summary = pooled.predicted_prob_summary
-            if summary.get("max") is not None:
-                assert summary["max"] <= 0.5 + 1e-9
+            max_p = summary.get("max")
+            if max_p is not None:
+                assert float(max_p) <= 0.5 + 1e-9
             notes_joined = " ".join(pooled.notes).lower()
             assert (
                 "zero positive" in notes_joined
