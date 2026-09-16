@@ -406,6 +406,9 @@ def audit_dataset(rows: Sequence[EvidenceRow]) -> DatasetAudit:
         f"real campaign dataset used for this analysis. Non-positive (SL+TIMEOUT) "
         f"count is {non_positive}. NO_FILL count is {no_fill} (excluded from binary target)."
     )
+    # total_signals here means "evidence rows analyzed" (accepted+simulated subset),
+    # not all strategy signals ever generated. accepted_candidates equals the same
+    # denominator because rejected-without-simulation rows are filtered upstream.
     return DatasetAudit(
         total_signals=total,
         accepted_candidates=total,
@@ -725,6 +728,11 @@ def run_chronological_model(
         "n_labeled": len(labeled),
         "ordering": "signal_epoch ascending (instrument, direction tie-break)",
         "shuffling": False,
+        "evaluation_design": "single_chronological_holdout",
+        "evaluation_note": (
+            "Single chronological holdout (train_ratio early / remainder OOS). "
+            "Not an expanding-window walk-forward. Exploratory secondary analysis only."
+        ),
     }
     if len(labeled) < 4:
         split_info["status"] = "insufficient_labeled"
@@ -1111,6 +1119,10 @@ def analyze_evidence(
         "train_ratio": train_ratio,
         "thresholds": list(thresholds),
         "primary_analysis": "univariate + continuous MFE",
+        "evaluation_design": "single_chronological_holdout",
+        "evaluation_note": (
+            "Not expanding-window walk-forward; one train/OOS cut by signal_epoch order."
+        ),
     }
     return PredictiveEvidenceReport(
         schema_version="6a.1",
@@ -1205,7 +1217,15 @@ def format_predictive_evidence_report(report: PredictiveEvidenceReport) -> str:
     lines.append("")
     for note in m.notes:
         lines.append(f"- {note}")
-    lines += ["", "## Chronological model (exploratory secondary)", ""]
+    lines += [
+        "",
+        "## Chronological model (exploratory secondary)",
+        "",
+        "Evaluation design: **single chronological holdout** "
+        "(early `train_ratio` for training, remainder for OOS). "
+        "This is **not** an expanding-window walk-forward validation.",
+        "",
+    ]
     lines.append(f"Config: `{report.model_config}`")
     lines.append(f"Split: `{report.chronological_split}`")
     if report.pooled_oos is None:

@@ -344,6 +344,7 @@ class TestChronologicalModel:
         pooled, split = run_chronological_model(rows, train_ratio=0.5)
         assert split["shuffling"] is False
         assert split["status"] == "ok"
+        assert split.get("evaluation_design") == "single_chronological_holdout"
         assert split["train_epoch_max"] <= split["oos_epoch_min"]
 
     def test_training_precedes_oos(self):
@@ -353,9 +354,33 @@ class TestChronologicalModel:
         assert split["train_n"] + split["oos_n"] == split["n_labeled"]
 
     def test_insufficient_positive_handling(self):
+        """Zero TP: model must not invent a positive class."""
         rows = _synthetic_campaign(n_tp=0, n_sl=5, n_timeout=3, n_no_fill=0)
         pooled, split = run_chronological_model(rows, train_ratio=0.5)
-        assert split["status"] in ("ok", "insufficient_after_feature_filter") or pooled is not None or pooled is None
+        assert split["n_labeled"] == 8
+        assert split.get("shuffling") is False
+        if split.get("status") == "insufficient_labeled":
+            assert pooled is None
+            return
+        # Enough labeled rows for a split: train has zero positives
+        assert split.get("train_positive", 0) == 0 or (
+            pooled is not None and pooled.train_positive == 0
+        )
+        if pooled is not None:
+            assert pooled.train_positive == 0
+            assert pooled.model_type in ("constant_majority", "RandomForestClassifier")
+            # With zero train positives, predicted probs should not favor class 1
+            # (constant model uses p=0; RF with single class also collapses)
+            summary = pooled.predicted_prob_summary
+            if summary.get("max") is not None:
+                assert summary["max"] <= 0.5 + 1e-9
+            notes_joined = " ".join(pooled.notes).lower()
+            assert (
+                "zero positive" in notes_joined
+                or "single-class" in notes_joined
+                or pooled.model_type == "constant_majority"
+            )
+
 
     def test_naive_baseline_present(self):
         rows = _synthetic_campaign(n_tp=4, n_sl=6, n_timeout=4, n_no_fill=0)
