@@ -352,7 +352,11 @@ def evidence_rows_from_ml_dataset(dataset: MLDataset) -> list[EvidenceRow]:
             EvidenceRow(
                 instrument=obs.instrument,
                 signal_epoch=obs.signal_epoch,
-                direction=obs.direction.value if isinstance(obs.direction, Direction) else str(obs.direction),
+                direction=(
+                    obs.direction.value
+                    if isinstance(obs.direction, Direction)
+                    else str(obs.direction)
+                ),
                 outcome=obs.outcome.value,
                 target=obs.target,
                 features=features,
@@ -553,7 +557,11 @@ def mann_whitney_u_and_p(
 
 
 def spearman_rho(x: Sequence[float], y: Sequence[float]) -> tuple[float | None, float | None]:
+    """Spearman rank correlation; returns (None, None) for insufficient or constant input."""
     if len(x) < 3 or len(x) != len(y):
+        return None, None
+    # Constant arrays are undefined for rank correlation — avoid SciPy warnings.
+    if len(set(x)) < 2 or len(set(y)) < 2:
         return None, None
     try:
         from scipy.stats import spearmanr
@@ -736,10 +744,17 @@ def mfe_diagnostics(rows: Sequence[EvidenceRow]) -> MFEDiagnostics:
             ys.append(m)
         rho, p = spearman_rho(xs, ys)
         feature_corr.append(
-            {"feature": name, "group": feature_group(name), "n": len(xs), "spearman_rho": rho, "p_value": p}
+            {
+                "feature": name,
+                "group": feature_group(name),
+                "n": len(xs),
+                "spearman_rho": rho,
+                "p_value": p,
+            }
         )
     notes = [
-        "MFE is analyzed as a continuous dependent variable; it is never used as a predictive feature.",
+        "MFE is analyzed as a continuous dependent variable; "
+        "it is never used as a predictive feature.",
         "MFE in R uses risk_distance when available; otherwise raw MFE is reported.",
         "TIMEOUT trades may carry partial favorable excursion even when TP is not reached.",
     ]
@@ -831,7 +846,11 @@ def run_chronological_model(
     ]
     if not usable_names:
         usable_names = [
-            n for n in FEATURE_NAMES if all(n in r.features and math.isfinite(r.features[n]) for r in labeled)
+            n
+            for n in FEATURE_NAMES
+            if all(
+                n in r.features and math.isfinite(r.features[n]) for r in labeled
+            )
         ]
     split_info["feature_names"] = usable_names
     X_train, y_train = _feature_matrix(train_rows, usable_names)
@@ -883,7 +902,8 @@ def run_chronological_model(
         model_type = "RandomForestClassifier"
         if hasattr(clf, "feature_importances_"):
             feature_importances = {
-                usable_names[i]: float(clf.feature_importances_[i]) for i in range(len(usable_names))
+                usable_names[i]: float(clf.feature_importances_[i])
+                for i in range(len(usable_names))
             }
     tp = sum(1 for pr, yt in zip(preds, y_oos, strict=True) if pr == 1 and yt == 1)
     fp = sum(1 for pr, yt in zip(preds, y_oos, strict=True) if pr == 1 and yt == 0)
@@ -947,27 +967,30 @@ def run_chronological_model(
     # Majority-class classifier R: trade only when predicted label is positive.
     # majority is computed on the train set; applied constantly to OOS.
     if majority == 1:
-        maj_r_vals = oos_r_all
         maj_total_r = oos_all_total_r
         maj_avg_r = oos_all_avg_r
         notes.append(
-            "Naive majority class is positive (1): majority classifier selects all OOS trades; "
-            "naive_majority_*_r equals always-trade OOS R."
+            "Naive majority class is positive (1): majority classifier selects all OOS "
+            "trades; naive_majority_*_r equals always-trade OOS R."
         )
     else:
-        # Predict non-TP for every OOS row -> no trades taken under a long-only act-on-positive rule.
-        maj_r_vals = []
+        # Predict non-TP for every OOS row -> no trades under act-on-positive rule.
         maj_total_r = 0.0
         maj_avg_r = None
         notes.append(
-            "Naive majority class is non-positive (0): majority classifier selects zero OOS trades "
-            "under act-on-predicted-positive semantics; naive_majority_total_r = 0."
+            "Naive majority class is non-positive (0): majority classifier selects zero "
+            "OOS trades under act-on-predicted-positive semantics; "
+            "naive_majority_total_r = 0."
         )
     notes.append(
-        "oos_all_trades_*_r is the always-trade OOS realized-R baseline (not the majority classifier)."
+        "oos_all_trades_*_r is the always-trade OOS realized-R baseline "
+        "(not the majority classifier)."
     )
     notes.append("Threshold sensitivity is exploratory only; no threshold is declared optimal.")
-    notes.append("Pooled OOS metrics are preferred over per-fold metrics when positives are sparse.")
+    notes.append(
+        "Pooled OOS metrics are preferred over per-fold metrics when positives "
+        "are sparse."
+    )
     pooled = PooledOOSResult(
         oos_n=len(y_oos),
         oos_positive=oos_pos,
@@ -1008,10 +1031,13 @@ def statistical_power_notes(audit: DatasetAudit) -> list[str]:
         f"Positive observations (TP): {pos}.",
         f"Non-positive observations (SL + TIMEOUT): {neg}.",
         f"Positive prevalence among labeled trades: {prev if prev is not None else 'undefined'}.",
-        "Train/test splitting with very few positives yields folds that may contain 0 or 1 positive.",
-        "Model fitting with rare positives risks unstable estimates, separation, and noise selection.",
+        "Train/test splitting with very few positives yields folds that may "
+        "contain 0 or 1 positive.",
+        "Model fitting with rare positives risks unstable estimates, "
+        "separation, and noise selection.",
         "Confidence intervals around effect sizes and classification metrics are extremely wide.",
-        "A reliable production decision threshold cannot be established from a handful of positives.",
+        "A reliable production decision threshold cannot be established from "
+        "a handful of positives.",
         "A non-significant test must not be interpreted as proof that the null is true.",
         "With this sample size it is not possible to perfectly distinguish: "
         "(1) no detectable evidence, (2) insufficient power, (3) genuinely weak/no association.",
@@ -1027,23 +1053,30 @@ def statistical_power_notes(audit: DatasetAudit) -> list[str]:
 
 def leakage_audit_notes() -> list[str]:
     return [
-        "Features are constructed exclusively from StrategySignal fields and TradeCandidate geometry available at signal/construction time.",
-        "Outcome, exit price, future candles, MFE, MAE, and duration are never used as predictive features.",
+        "Features are constructed exclusively from StrategySignal fields and "
+        "TradeCandidate geometry available at signal/construction time.",
+        "Outcome, exit price, future candles, MFE, MAE, and duration are never "
+        "used as predictive features.",
         "MFE is analyzed only as a dependent variable in continuous analysis.",
-        "Chronological split ensures training observations precede OOS by signal_epoch; no random shuffle.",
+        "Chronological split ensures training observations precede OOS by "
+        "signal_epoch; no random shuffle.",
         "Random Forest hyperparameters are fixed (no search on the full dataset).",
-        "Preprocessing that learns parameters is fit on training data only when used inside OOS modeling.",
+        "Preprocessing that learns parameters is fit on training data only "
+        "when used inside OOS modeling.",
     ]
 
 
 def build_limitations(audit: DatasetAudit, inst_audits: dict[str, DatasetAudit]) -> list[str]:
     lim = [
         audit.explicit_positive_ceiling_note,
-        "NO_FILL trades are excluded from the binary TP vs non-TP target but are reported in the dataset audit.",
+        "NO_FILL trades are excluded from the binary TP vs non-TP target but "
+        "are reported in the dataset audit.",
         "Random Forest is secondary/exploratory and is not the primary evidence source.",
-        "Univariate p-values are not corrected for multiplicity by default; raw p-values are reported alongside effect sizes.",
+        "Univariate p-values are not corrected for multiplicity by default; "
+        "raw p-values are reported alongside effect sizes.",
         "Feature importance from Random Forest must not be over-interpreted with this sample size.",
-        "Threshold sensitivity is subject to selection bias and low power; no threshold is declared optimal.",
+        "Threshold sensitivity is subject to selection bias and low power; "
+        "no threshold is declared optimal.",
     ]
     for inst, a in inst_audits.items():
         if a.positive_count <= 1:
@@ -1071,18 +1104,21 @@ def research_conclusions(
     if pos < 3:
         a = (
             f"With only {pos} positive observation(s), univariate tests lack power. "
-            "No statistically reliable evidence of feature separation between TP and non-TP can be claimed."
+            "No statistically reliable evidence of feature separation between "
+            "TP and non-TP can be claimed."
         )
     elif strong:
         names = ", ".join(u.feature for u in strong[:5])
         a = (
-            f"A small number of features ({names}) showed comparatively larger descriptive separation. "
-            "Given the positive ceiling, this is exploratory evidence, not proof of a deployable edge."
+            f"A small number of features ({names}) showed comparatively larger "
+            "descriptive separation. Given the positive ceiling, this is "
+            "exploratory evidence, not proof of a deployable edge."
         )
     elif tested:
         a = (
-            "No feature met both a moderate effect-size threshold and an uncorrected p<0.05 criterion. "
-            "No clear univariate separation was detected; however, the sample is too small to distinguish "
+            "No feature met both a moderate effect-size threshold and an "
+            "uncorrected p<0.05 criterion. No clear univariate separation was "
+            "detected; however, the sample is too small to distinguish "
             "weak signal from insufficient power."
         )
     else:
@@ -1114,13 +1150,15 @@ def research_conclusions(
         ]
         if corr_hits:
             d = (
-                f"Continuous MFE analysis found {len(corr_hits)} feature association(s) with |ρ|≥0.3 "
+                f"Continuous MFE analysis found {len(corr_hits)} feature "
+                f"association(s) with |ρ|≥0.3 "
                 "and uncorrected p<0.05. TIMEOUT trades may retain partial favorable excursion."
             )
         else:
             d = (
                 f"Among {mfe.n_with_mfe} filled trades with MFE, no strong Spearman association "
-                f"was detected. Median MFE={mfe.mfe_median}. This does not prove absence of association."
+                f"was detected. Median MFE={mfe.mfe_median}. This does not "
+                "prove absence of association."
             )
 
     if pooled is None:
@@ -1128,12 +1166,19 @@ def research_conclusions(
     else:
         e = (
             f"OOS n={pooled.oos_n} (positives={pooled.oos_positive}). "
-            f"Model accuracy={pooled.model_accuracy}, naive majority accuracy={pooled.naive_accuracy}. "
+            f"Model accuracy={pooled.model_accuracy}, naive majority "
+            f"accuracy={pooled.naive_accuracy}. "
         )
         if pooled.oos_positive == 0:
-            e += "OOS contained zero positives; no evidence beyond the naive baseline can be claimed."
+            e += (
+                "OOS contained zero positives; no evidence beyond the naive "
+                "baseline can be claimed."
+            )
         else:
-            e += "Sparse positives prevent reliable claims of practical predictive gain over the naive baseline."
+            e += (
+                "Sparse positives prevent reliable claims of practical "
+                "predictive gain over the naive baseline."
+            )
 
     if pooled is None or pooled.oos_n < 5:
         f = "Pooled OOS results are not stable enough to support any practical conclusion."
@@ -1155,7 +1200,8 @@ def research_conclusions(
     )
     h = (
         "Milestone 6B (horizon-aware trade construction & exit study) is justified as a research "
-        "follow-on because continuous MFE and TIMEOUT behavior can inform exit/horizon design without "
+        "follow-on because continuous MFE and TIMEOUT behavior can inform "
+        "exit/horizon design without "
         "requiring a proven pre-entry classifier. 6A does not establish a production feature gate."
     )
     return {
@@ -1203,7 +1249,8 @@ def analyze_evidence(
         notes: list[str] = []
         if ia.positive_count <= 1:
             notes.append(
-                f"Only {ia.positive_count} positive(s) for {inst}; predictive inference is not supported."
+                f"Only {ia.positive_count} positive(s) for {inst}; predictive "
+                "inference is not supported."
             )
         ioos = None
         if ia.labeled_closed_trades >= 4 and ia.positive_count >= 1:
@@ -1251,7 +1298,9 @@ def analyze_evidence(
     )
 
 
-def analyze_from_experiment_result(result: ExperimentResult, **kwargs: Any) -> PredictiveEvidenceReport:
+def analyze_from_experiment_result(
+    result: ExperimentResult, **kwargs: Any
+) -> PredictiveEvidenceReport:
     return analyze_evidence(evidence_rows_from_experiment_result(result), **kwargs)
 
 
@@ -1275,7 +1324,8 @@ def format_predictive_evidence_report(report: PredictiveEvidenceReport) -> str:
         "## Research question",
         "",
         "Do the existing pre-entry features contain evidence of predictive information "
-        "in the real campaign data, and how much can we infer given the observed number of positive outcomes?",
+        "in the real campaign data, and how much can we infer given the "
+        "observed number of positive outcomes?",
         "",
         "## Scope freeze",
         "",
@@ -1284,9 +1334,11 @@ def format_predictive_evidence_report(report: PredictiveEvidenceReport) -> str:
         "",
         "## Dataset audit",
         "",
-        f"- Strategy signals (upstream): **{a.strategy_signals if a.strategy_signals is not None else 'not supplied'}**",
+        f"- Strategy signals (upstream): **"
+        f"{a.strategy_signals if a.strategy_signals is not None else 'not supplied'}**",
         f"- Candidates accepted (upstream): **{a.accepted_candidates}**",
-        f"- Candidates rejected (upstream): **{a.candidates_rejected if a.candidates_rejected is not None else 'not supplied'}**",
+        f"- Candidates rejected (upstream): **"
+        f"{a.candidates_rejected if a.candidates_rejected is not None else 'not supplied'}**",
         f"- Evidence rows analyzed: **{a.evidence_rows_analyzed}**",
         f"- Filled trades: **{a.filled_trades}**",
         f"- NO_FILL: **{a.no_fill_count}** (excluded from binary target)",
@@ -1314,9 +1366,16 @@ def format_predictive_evidence_report(report: PredictiveEvidenceReport) -> str:
     ]
     for n in report.statistical_power_notes:
         lines.append(f"- {n}")
-    lines += ["", "## Univariate feature diagnostics (PRIMARY)", "", report.multiple_testing_note, ""]
+    lines += [
+        "",
+        "## Univariate feature diagnostics (PRIMARY)",
+        "",
+        report.multiple_testing_note,
+        "",
+    ]
     lines.append(
-        "| Feature | Group | n_TP | n_non | median_TP | median_non | Cliff δ | p (MWU) | direction |"
+        "| Feature | Group | n_TP | n_non | median_TP | median_non | "
+        "Cliff δ | p (MWU) | direction |"
     )
     lines.append("|---|---|---:|---:|---:|---:|---:|---:|---|")
     for u in report.univariate:
@@ -1358,7 +1417,10 @@ def format_predictive_evidence_report(report: PredictiveEvidenceReport) -> str:
         lines.append(f"- Naive accuracy: **{_fmt(p.naive_accuracy)}**")
         lines.append(f"- Model accuracy: **{_fmt(p.model_accuracy)}**")
         lines.append(f"- Balanced accuracy: **{_fmt(p.model_balanced_accuracy)}**")
-        lines.append(f"- Precision / recall: **{_fmt(p.model_precision)}** / **{_fmt(p.model_recall)}**")
+        lines.append(
+            f"- Precision / recall: **{_fmt(p.model_precision)}** / "
+            f"**{_fmt(p.model_recall)}**"
+        )
         lines.append(f"- Confusion (0.5): `{p.confusion}`")
         lines.append(f"- Predicted probability summary: `{p.predicted_prob_summary}`")
         lines.append(
@@ -1372,12 +1434,16 @@ def format_predictive_evidence_report(report: PredictiveEvidenceReport) -> str:
         lines.append("")
         lines.append("### Threshold sensitivity (no winner selected)")
         lines.append("")
-        lines.append("| threshold | n_selected | TP | non-TP | pos_rate | total_R | avg_R | median_R |")
+        lines.append(
+            "| threshold | n_selected | TP | non-TP | pos_rate | "
+            "total_R | avg_R | median_R |"
+        )
         lines.append("|---:|---:|---:|---:|---:|---:|---:|---:|")
         for t in p.selected_by_threshold:
             lines.append(
                 f"| {t.threshold:.2f} | {t.n_selected} | {t.tp_count} | {t.non_tp_count} | "
-                f"{_fmt(t.positive_rate)} | {_fmt(t.total_r)} | {_fmt(t.average_r)} | {_fmt(t.median_r)} |"
+                f"{_fmt(t.positive_rate)} | {_fmt(t.total_r)} | "
+                f"{_fmt(t.average_r)} | {_fmt(t.median_r)} |"
             )
         for note in p.notes:
             lines.append(f"- {note}")

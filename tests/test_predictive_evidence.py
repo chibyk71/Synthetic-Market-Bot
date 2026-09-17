@@ -133,7 +133,7 @@ def _synthetic_campaign(
             )
         )
         t += 60
-    for i in range(n_timeout):
+    for _ in range(n_timeout):
         rows.append(
             _row(
                 instrument=instrument,
@@ -147,7 +147,7 @@ def _synthetic_campaign(
             )
         )
         t += 60
-    for i in range(n_no_fill):
+    for _ in range(n_no_fill):
         rows.append(
             _row(
                 instrument=instrument,
@@ -225,9 +225,20 @@ class TestDatasetAudit:
 
     def test_instrument_counts(self):
         rows = (
-            _synthetic_campaign(n_tp=1, n_sl=1, n_timeout=0, n_no_fill=0, instrument="volatility_75_1s")
+            _synthetic_campaign(
+                n_tp=1,
+                n_sl=1,
+                n_timeout=0,
+                n_no_fill=0,
+                instrument="volatility_75_1s",
+            )
             + _synthetic_campaign(
-                n_tp=0, n_sl=2, n_timeout=0, n_no_fill=0, instrument="step_index", epoch0=1_800_000_000
+                n_tp=0,
+                n_sl=2,
+                n_timeout=0,
+                n_no_fill=0,
+                instrument="step_index",
+                epoch0=1_800_000_000,
             )
         )
         audit = audit_dataset(rows)
@@ -351,9 +362,20 @@ class TestMFE:
 
     def test_instrument_separation_in_mfe(self):
         rows = (
-            _synthetic_campaign(n_tp=1, n_sl=1, n_timeout=0, n_no_fill=0, instrument="volatility_75_1s")
+            _synthetic_campaign(
+                n_tp=1,
+                n_sl=1,
+                n_timeout=0,
+                n_no_fill=0,
+                instrument="volatility_75_1s",
+            )
             + _synthetic_campaign(
-                n_tp=1, n_sl=1, n_timeout=0, n_no_fill=0, instrument="step_index", epoch0=1_800_000_000
+                n_tp=1,
+                n_sl=1,
+                n_timeout=0,
+                n_no_fill=0,
+                instrument="step_index",
+                epoch0=1_800_000_000,
             )
         )
         mfe = mfe_diagnostics(rows)
@@ -441,9 +463,20 @@ class TestChronologicalModel:
 class TestInstrumentSeparation:
     def test_v75_and_step_separated(self):
         rows = (
-            _synthetic_campaign(n_tp=5, n_sl=5, n_timeout=3, n_no_fill=1, instrument="volatility_75_1s")
+            _synthetic_campaign(
+                n_tp=5,
+                n_sl=5,
+                n_timeout=3,
+                n_no_fill=1,
+                instrument="volatility_75_1s",
+            )
             + _synthetic_campaign(
-                n_tp=1, n_sl=4, n_timeout=2, n_no_fill=1, instrument="step_index", epoch0=1_800_000_000
+                n_tp=1,
+                n_sl=4,
+                n_timeout=2,
+                n_no_fill=1,
+                instrument="step_index",
+                epoch0=1_800_000_000,
             )
         )
         report = analyze_evidence(rows)
@@ -451,13 +484,21 @@ class TestInstrumentSeparation:
         assert "step_index" in report.instruments
         assert report.instruments["volatility_75_1s"].audit.positive_count == 5
         assert report.instruments["step_index"].audit.positive_count == 1
-        assert any("1 positive" in n or "descriptive" in n.lower() for n in report.instruments["step_index"].notes)
+        step_notes = report.instruments["step_index"].notes
+        assert any(
+            "1 positive" in n or "descriptive" in n.lower() for n in step_notes
+        )
 
     def test_step_small_sample_limitation_in_report(self):
         rows = (
             _synthetic_campaign(n_tp=5, n_sl=5, n_timeout=0, n_no_fill=0)
             + _synthetic_campaign(
-                n_tp=1, n_sl=3, n_timeout=0, n_no_fill=0, instrument="step_index", epoch0=2_000_000_000
+                n_tp=1,
+                n_sl=3,
+                n_timeout=0,
+                n_no_fill=0,
+                instrument="step_index",
+                epoch0=2_000_000_000,
             )
         )
         report = analyze_evidence(rows)
@@ -528,7 +569,12 @@ class TestAnalyzeEvidence:
         rows = (
             _synthetic_campaign(n_tp=5, n_sl=7, n_timeout=4, n_no_fill=2)
             + _synthetic_campaign(
-                n_tp=1, n_sl=4, n_timeout=2, n_no_fill=1, instrument="step_index", epoch0=1_900_000_000
+                n_tp=1,
+                n_sl=4,
+                n_timeout=2,
+                n_no_fill=1,
+                instrument="step_index",
+                epoch0=1_900_000_000,
             )
         )
         report = analyze_evidence(rows)
