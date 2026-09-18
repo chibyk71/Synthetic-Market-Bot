@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
-import pytest
+import pytest  # type: ignore[import-not-found]
 
+from smb.research.experiment import ExperimentResult, TradeExperimentRow
 from smb.research.horizon_exit_study import (
     DEFAULT_BASELINE_HORIZON_SECONDS,
     FROZEN_BASELINE_HORIZON_SECONDS,
@@ -67,10 +69,10 @@ def _row(
     entry_time: int | None = 1_700_000_010,
     exit_time: int | None = 1_700_000_130,
     rejection_reason: RejectionReason | None = None,
-):
-    cand = None
+) -> TradeExperimentRow:
+    candidate_obj = None
     if accepted:
-        cand = _candidate(
+        candidate_obj = _candidate(
             entry=entry_price or 100.0,
             stop=stop_loss or 90.0,
             target=take_profit or 120.0,
@@ -78,28 +80,31 @@ def _row(
             reward=reward_distance,
             direction=Direction.LONG if direction == "long" else Direction.SHORT,
         )
-    return SimpleNamespace(
-        instrument=instrument,
-        signal_epoch=epoch,
-        direction=direction,
-        accepted=accepted,
-        rejection_reason=rejection_reason,
-        entry_price=entry_price,
-        stop_loss=stop_loss,
-        take_profit=take_profit,
-        risk_reward=reward_distance / risk_distance if risk_distance else None,
-        risk_amount=None,
-        outcome=outcome,
-        entry_time=entry_time,
-        exit_time=exit_time,
-        duration_seconds=duration,
-        realized_r=None,
-        mfe=mfe,
-        mae=mae,
-        signal=None,
-        candidate=cand,
-        simulation=None,
-        metrics=None,
+    return cast(
+        TradeExperimentRow,
+        SimpleNamespace(
+            instrument=instrument,
+            signal_epoch=epoch,
+            direction=direction,
+            accepted=accepted,
+            rejection_reason=rejection_reason,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            risk_reward=reward_distance / risk_distance if risk_distance else None,
+            risk_amount=None,
+            outcome=outcome,
+            entry_time=entry_time,
+            exit_time=exit_time,
+            duration_seconds=duration,
+            realized_r=None,
+            mfe=mfe,
+            mae=mae,
+            signal=None,
+            candidate=candidate_obj,
+            simulation=None,
+            metrics=None,
+        ),
     )
 
 
@@ -112,8 +117,8 @@ def _synthetic_records(
     n_rejected: int = 1,
     instrument: str = "volatility_75_1s",
     epoch0: int = 1_700_000_000,
-) -> list:
-    rows = []
+) -> list[TradeExperimentRow]:
+    rows: list[TradeExperimentRow] = []
     i = 0
     for _ in range(n_tp):
         rows.append(
@@ -190,7 +195,7 @@ def _fake_experiment_result(
     accepted: int | None = None,
     rejected: int | None = None,
     horizon: int = 900,
-):
+) -> ExperimentResult:
     n_signals = signals if signals is not None else len(rows)
     n_acc = accepted if accepted is not None else sum(1 for r in rows if r.accepted)
     n_rej = rejected if rejected is not None else sum(1 for r in rows if not r.accepted)
@@ -220,13 +225,16 @@ def _fake_experiment_result(
         instrument=instrument,
         simulation=SimpleNamespace(max_duration_seconds=horizon),
     )
-    return SimpleNamespace(
-        config=config,
-        summary=summary,
-        rows=tuple(rows),
-        simulations=(),
-        metrics=(),
-        validation=None,
+    return cast(
+        ExperimentResult,
+        SimpleNamespace(
+            config=config,
+            summary=summary,
+            rows=tuple(rows),
+            simulations=(),
+            metrics=(),
+            validation=None,
+        ),
     )
 
 
@@ -266,7 +274,7 @@ class TestStudyRecord:
         assert rec.exclusion_reason == "invalid_risk"
         assert rec.filled is False
 
-    def test_nonfinite_mfe_not_zeroed(self):
+    def test_non_finite_mfe_not_zeroed(self):
         rec = study_record_from_row(
             _row(outcome=SimulationOutcome.TP, mfe=float("nan"), mae=3.0)
         )
@@ -609,7 +617,7 @@ class TestNoFillAndDenominators:
         assert rec.filled is False
         assert rec.mfe_target_ratio is None
 
-    def test_nonfinite_target_distance(self):
+    def test_non_finite_target_distance(self):
         rec = study_record_from_row(
             _row(outcome=SimulationOutcome.TP, reward_distance=float("nan"), mfe=5.0)
         )
@@ -639,7 +647,7 @@ class TestZeroSignalInstrument:
 class TestObservationWindowIntegration:
     """Prove MFE/MAE use fill → exit/horizon only (via ResearchMetricsCalculator)."""
 
-    def test_prefill_and_postexit_ticks_do_not_affect_mfe_mae(self):
+    def test_prefill_and_post_exit_ticks_do_not_affect_mfe_mae(self):
         from datetime import UTC, datetime
 
         from smb.deriv.history import Tick
