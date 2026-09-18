@@ -70,6 +70,7 @@ def test_range_query_half_open(store: ParquetTickStore):
 
 def test_query_chronological(store: ParquetTickStore):
     instrument = "volatility_75_1s"
+    # Write out of order; storage should still read chronological by epoch
     store.write_page([_st(instrument, 30, 3.0)])
     store.write_page([_st(instrument, 10, 1.0)])
     store.write_page([_st(instrument, 20, 2.0)])
@@ -98,6 +99,18 @@ def test_duplicate_within_incoming_batch(store: ParquetTickStore):
     assert store.coverage(instrument).tick_count == 2
 
 
+def test_duplicate_detection_validation():
+    ticks = [
+        _st("x", 1, 1.0),
+        _st("x", 1, 1.0),
+        _st("x", 2, 2.0),
+    ]
+    from smb.data.validation import detect_duplicates
+
+    dups = detect_duplicates(ticks)
+    assert dups == 1
+
+
 def test_validate_valid_dataset():
     ticks = [
         _st("volatility_75_1s", 1, 1.0),
@@ -106,6 +119,7 @@ def test_validate_valid_dataset():
     ]
     report = validate_ticks(ticks, instrument="volatility_75_1s")
     assert report.ok
+    assert report.tick_count == 3
 
 
 def test_validate_invalid_epoch():
@@ -120,11 +134,19 @@ def test_validate_non_monotonic():
     assert not report.ok
 
 
+def test_validate_instrument_mismatch():
+    ticks = [_st("a", 1, 1.0)]
+    report = validate_ticks(ticks, instrument="b")
+    assert not report.ok
+
+
 def test_dataset_stats_via_sql(store: ParquetTickStore):
     instrument = "volatility_75_1s"
     store.write_page([_st(instrument, i, float(i)) for i in range(10, 15)])
     stats = compute_dataset_stats(store, instrument)
     assert stats.tick_count == 5
+    assert stats.earliest_epoch == 10
+    assert stats.latest_epoch == 14
 
 
 def test_coverage_detects_duplicates_without_list(store: ParquetTickStore):
@@ -241,7 +263,12 @@ async def test_iter_history_pages_stops_on_empty_after_data():
 
 
 def test_source_order_preserved_across_month_boundary(store: ParquetTickStore):
-    """source_order follows input order even when ticks span partitions."""
+    """source_order follows input order even when ticks span partitions.
+
+    Jan 31 23:59 → Feb 01 00:00 → Jan 31 23:59+1s must keep increasing
+    source_order in input sequence, and coverage must see the backward
+    epoch jump on the third tick.
+    """
     from smb.data.store import year_month
 
     jan_a = 1580515140
@@ -265,7 +292,12 @@ def test_source_order_preserved_across_month_boundary(store: ParquetTickStore):
 
 def test_coverage_detects_source_order_non_monotonic(store: ParquetTickStore):
     instrument = "volatility_75_1s"
-    store.write_page([_st(instrument, 10, 1.0), _st(instrument, 20, 2.0)])
+    store.write_page(
+        [
+            _st(instrument, 10, 1.0),
+            _st(instrument, 20, 2.0),
+        ]
+    )
     store.reindex_source_order(instrument)
     cov = store.coverage(instrument)
     assert cov.tick_count == 2
@@ -280,6 +312,7 @@ def test_store_read_ticks_range_streams(store: ParquetTickStore):
 
 def test_stored_to_replay_to_candles(store: ParquetTickStore):
     instrument = "volatility_75_1s"
+    # two ticks in same M1 bucket
     base = 1_700_000_000
     store.write_page(
         [
@@ -291,6 +324,7 @@ def test_stored_to_replay_to_candles(store: ParquetTickStore):
     memory = [Tick(timestamp=t.timestamp, price=t.price, epoch=t.epoch) for t in ticks]
     candles_from_store = CandleBuilder(TIMEFRAME_M1).process(HistoricalReplay(memory))
     candles_memory = CandleBuilder(TIMEFRAME_M1).process(HistoricalReplay(memory))
+
     assert len(candles_from_store) == len(candles_memory) == 1
     for a, b in zip(candles_from_store, candles_memory, strict=True):
         assert a == b
