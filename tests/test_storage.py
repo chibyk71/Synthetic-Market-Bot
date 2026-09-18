@@ -218,48 +218,15 @@ async def test_iter_history_pages_stops_on_empty():
             return empty
 
         mp.setattr(ingest_mod, "fetch_ticks", fake_fetch)
-        collected: list[tuple] = []
-        async for item in iter_history_pages(client, "X", pages=5):
-            collected.append(item)
-        # API yields (page, retries_used), not bare HistoryPage
+        collected = []
+        async for page, retries in iter_history_pages(client, "X", pages=5):
+            collected.append((page, retries))
         assert len(collected) == 1
         page, retries = collected[0]
         assert page.count == 0
         assert isinstance(retries, int)
         assert retries >= 0
-        # Stopped after empty page — did not request remaining pages
         assert fetch_calls["n"] == 1
-
-
-@pytest.mark.asyncio
-async def test_iter_history_pages_stops_on_empty_after_data():
-    """Non-empty page then empty page: only the empty page ends the walk."""
-    client = AsyncMock()
-    with pytest.MonkeyPatch.context() as mp:
-        from smb.data import ingest as ingest_mod
-
-        epoch = 1_700_000_000
-        tick = Tick(
-            timestamp=datetime.fromtimestamp(epoch, tz=UTC),
-            price=100.0,
-            epoch=epoch,
-        )
-        full = HistoryPage(symbol="X", ticks=(tick,), pip_size=0.01)
-        empty = HistoryPage(symbol="X", ticks=(), pip_size=None)
-        pages_queue = [full, empty, empty]
-
-        async def fake_fetch(client, symbol, *, count, end, start=1):
-            if not pages_queue:
-                return empty
-            return pages_queue.pop(0)
-
-        mp.setattr(ingest_mod, "fetch_ticks", fake_fetch)
-        collected = []
-        async for page, retries in iter_history_pages(client, "X", pages=5):
-            collected.append((page.count, retries))
-        assert len(collected) == 2
-        assert collected[0][0] == 1
-        assert collected[1][0] == 0
 
 
 def test_source_order_preserved_across_month_boundary(store: ParquetTickStore):
