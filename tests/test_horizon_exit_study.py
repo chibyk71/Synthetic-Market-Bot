@@ -10,6 +10,7 @@ import pytest
 
 from smb.research.horizon_exit_study import (
     DEFAULT_BASELINE_HORIZON_SECONDS,
+    FROZEN_BASELINE_HORIZON_SECONDS,
     HorizonExitStudyReport,
     analyze_horizon_exit_study,
     analyze_instrument,
@@ -17,6 +18,7 @@ from smb.research.horizon_exit_study import (
     count_outcomes,
     format_horizon_exit_study_report,
     leakage_review_notes,
+    paired_horizon_comparison,
     run_horizon_exit_study_on_results,
     study_record_from_row,
     target_reachability_summary,
@@ -354,7 +356,7 @@ class TestInstrumentAnalysis:
         records = [study_record_from_row(r) for r in rows]
         result = analyze_instrument(records, instrument="volatility_75_1s")
         ids = {s.scenario_id for s in result.scenarios}
-        assert "baseline_horizon" in ids
+        assert "baseline_horizon" in ids or "primary_horizon" in ids
         assert "partial_target_mfe_r" in ids
         assert "target_reachability" in ids
         assert "extended_horizon_comparison" in ids
@@ -409,6 +411,8 @@ class TestFullReport:
             if s.scenario_id == "extended_horizon_comparison"
         )
         assert ext_sc.label == "exploratory"
+        assert "paired_comparison" in ext_sc.metrics
+        assert "timeout_to_tp" in ext_sc.metrics["paired_comparison"]
 
     def test_empty_dataset(self):
         results = [
@@ -449,3 +453,370 @@ class TestCLIRegistration:
         with pytest.raises(SystemExit) as exc:
             main(["run-horizon-exit-study", "--help"])
         assert exc.value.code == 0
+
+
+
+class TestBaselinePreservationEnforced:
+    def test_canonical_900_preserves_baseline(self):
+        rows = _synthetic_records()
+        report = analyze_horizon_exit_study(
+            [_fake_experiment_result(rows)], horizon_seconds=900
+        )
+        assert report.baseline_preserved is True
+        assert report.is_canonical_baseline_run is True
+        assert report.analysis_horizon_seconds == 900
+        assert report.canonical_baseline_horizon_seconds == FROZEN_BASELINE_HORIZON_SECONDS
+        ids = {s.scenario_id for s in report.instruments[0].scenarios}
+        assert "baseline_horizon" in ids
+
+    def test_non_900_does_not_claim_baseline_preserved(self):
+        rows = _synthetic_records()
+        report = analyze_horizon_exit_study(
+            [_fake_experiment_result(rows, horizon=600)], horizon_seconds=600
+        )
+        assert report.baseline_preserved is False
+        assert report.is_canonical_baseline_run is False
+        assert report.analysis_horizon_seconds == 600
+        ids = {s.scenario_id for s in report.instruments[0].scenarios}
+        assert "primary_horizon" in ids
+        assert "baseline_horizon" not in ids
+        scenarios = report.instruments[0].scenarios
+        primary = next(s for s in scenarios if s.scenario_id == "primary_horizon")
+        assert primary.label == "exploratory"
+
+
+class TestPairedExtendedHorizon:
+    def test_timeout_to_tp_conversion_paired(self):
+        # Same signal keys; baseline TIMEOUT becomes TP at extended
+        base_rows = [
+            _row(epoch=100, outcome=SimulationOutcome.TIMEOUT, mfe=8.0),
+            _row(epoch=101, outcome=SimulationOutcome.SL, mfe=2.0),
+        ]
+        ext_rows = [
+            _row(epoch=100, outcome=SimulationOutcome.TP, mfe=25.0),
+            _row(epoch=101, outcome=SimulationOutcome.SL, mfe=2.0),
+        ]
+        base_recs = [study_record_from_row(r) for r in base_rows]
+        ext_recs = [study_record_from_row(r) for r in ext_rows]
+        paired = paired_horizon_comparison(base_recs, ext_recs)
+        assert paired["n_shared"] == 2
+        assert paired["timeout_to_tp"] == 1
+        assert paired["timeout_to_sl"] == 0
+        assert paired["timeout_to_timeout"] == 0
+        assert paired["outcome_transitions"]["timeout->tp"] == 1
+
+    def test_extended_not_greater_not_estimable(self):
+        rows = _synthetic_records()
+        report = analyze_horizon_exit_study(
+            [_fake_experiment_result(rows)],
+            horizon_seconds=900,
+            extended_results=[_fake_experiment_result(rows, horizon=900)],
+            extended_horizon_seconds=900,
+        )
+        ext = next(
+            s
+            for s in report.instruments[0].scenarios
+            if s.scenario_id == "extended_horizon_comparison"
+        )
+        assert ext.label == "not_estimable"
+        assert ext.metrics["status"] == "extended_not_greater_than_primary"
+
+
+class TestShortDirection:
+    def test_short_mfe_r_and_target_ratio(self):
+        # Short: mfe is favorable move in price terms; ratio still mfe/risk
+        rec = study_record_from_row(
+            _row(
+                direction="short",
+                outcome=SimulationOutcome.TP,
+                mfe=15.0,
+                mae=4.0,
+                risk_distance=10.0,
+                reward_distance=20.0,
+                entry_price=100.0,
+                stop_loss=110.0,
+                take_profit=80.0,
+            )
+        )
+        assert rec.filled is True
+        assert rec.mfe_r == pytest.approx(1.5)
+        assert rec.mae_r == pytest.approx(0.4)
+        assert rec.mfe_target_ratio == pytest.approx(0.75)
+
+    def test_short_in_instrument_analysis(self):
+        rows = [
+            _row(direction="short", outcome=SimulationOutcome.TP, mfe=20.0, epoch=1),
+            _row(direction="short", outcome=SimulationOutcome.SL, mfe=3.0, epoch=2),
+        ]
+        records = [study_record_from_row(r) for r in rows]
+        result = analyze_instrument(records, instrument="volatility_75_1s")
+        assert result.outcomes.tp == 1
+        assert result.outcomes.sl == 1
+        assert result.mfe_r_distribution is not None
+        assert result.mfe_r_distribution.count == 2
+
+
+class TestTargetReachabilitySemantics:
+    def test_by_outcome_breakdown(self):
+        rows = [
+            _row(outcome=SimulationOutcome.TP, mfe=25.0, reward_distance=20.0, epoch=1),
+            _row(outcome=SimulationOutcome.SL, mfe=5.0, reward_distance=20.0, epoch=2),
+            _row(outcome=SimulationOutcome.TIMEOUT, mfe=22.0, reward_distance=20.0, epoch=3),
+            _row(outcome=SimulationOutcome.TIMEOUT, mfe=2.0, reward_distance=20.0, epoch=4),
+        ]
+        records = [study_record_from_row(r) for r in rows]
+        summary = target_reachability_summary(records)
+        assert summary["metric_name"] == "pre_terminal_exit_mfe_target_reachability"
+        assert "by_outcome" in summary
+        assert summary["by_outcome"]["tp"]["n_mfe_reached_target"] == 1
+        assert summary["by_outcome"]["sl"]["n_mfe_reached_target"] == 0
+        assert summary["by_outcome"]["timeout"]["n_mfe_reached_target"] == 1
+        assert any("pre-terminal" in n.lower() or "Pre-terminal" in n for n in summary["notes"])
+
+
+class TestNoFillAndDenominators:
+    def test_no_fill_excluded_from_threshold_distributions(self):
+        rows = _synthetic_records(
+            n_tp=2, n_sl=0, n_timeout=0, n_no_fill=5, n_rejected=0
+        )
+        records = [study_record_from_row(r) for r in rows]
+        thr = threshold_reach(records, (0.25,))
+        # only 2 filled TP with mfe
+        assert thr[0].n_eligible == 2
+        oc = count_outcomes(records)
+        assert oc.no_fill == 5
+        assert oc.filled == 2
+        # no_fill must not appear in mfe_r dist via instrument analysis
+        result = analyze_instrument(records, instrument="volatility_75_1s")
+        assert result.mfe_r_distribution is not None
+        assert result.mfe_r_distribution.count == 2
+
+    def test_denominator_reconciliation(self):
+        rows = _synthetic_records(
+            n_tp=2, n_sl=3, n_timeout=1, n_no_fill=2, n_rejected=1
+        )
+        records = [study_record_from_row(r) for r in rows]
+        oc = count_outcomes(records, signals=9, accepted=8, rejected=1)
+        assert oc.tp + oc.sl + oc.timeout == oc.filled
+        assert oc.no_fill == 2
+        assert oc.filled + oc.no_fill + oc.rejected == 2 + 2 + 1 + 3 + 1  # all rows
+
+    def test_invalid_target_distance_excluded(self):
+        rec = study_record_from_row(
+            _row(outcome=SimulationOutcome.TP, reward_distance=0.0, mfe=5.0)
+        )
+        assert rec.exclusion_reason == "invalid_target"
+        assert rec.filled is False
+        assert rec.mfe_target_ratio is None
+
+    def test_nonfinite_target_distance(self):
+        rec = study_record_from_row(
+            _row(outcome=SimulationOutcome.TP, reward_distance=float("nan"), mfe=5.0)
+        )
+        assert rec.exclusion_reason == "invalid_target"
+        assert rec.filled is False
+
+
+class TestZeroSignalInstrument:
+    def test_zero_signal_instrument_audited_independently(self):
+        v75 = _synthetic_records(instrument="volatility_75_1s", n_tp=2, n_sl=1)
+        empty_step = _fake_experiment_result(
+            [], instrument="step_index", signals=0, accepted=0, rejected=0
+        )
+        report = analyze_horizon_exit_study(
+            [
+                _fake_experiment_result(v75, instrument="volatility_75_1s"),
+                empty_step,
+            ]
+        )
+        inst_map = {i.instrument: i for i in report.instruments}
+        assert "step_index" in inst_map
+        assert inst_map["step_index"].outcomes.signals == 0
+        assert inst_map["step_index"].outcomes.filled == 0
+        assert inst_map["volatility_75_1s"].outcomes.filled >= 1
+
+
+class TestObservationWindowIntegration:
+    """Prove MFE/MAE use fill → exit/horizon only (via ResearchMetricsCalculator)."""
+
+    def test_prefill_and_postexit_ticks_do_not_affect_mfe_mae(self):
+        from datetime import UTC, datetime
+
+        from smb.deriv.history import Tick
+        from smb.research.metrics import ResearchMetricsCalculator
+        from smb.simulation.models import ExitReason, TradeSimulationResult
+        from smb.strategy.models import (
+            Direction,
+            Displacement,
+            FairValueGap,
+            LiquiditySweep,
+            M15Context,
+            MarketStructureBreak,
+            StrategySignal,
+            SwingPoint,
+        )
+        from smb.trade.models import TradeCandidate
+
+        def tick(epoch: int, price: float) -> Tick:
+            return Tick(
+                timestamp=datetime.fromtimestamp(epoch, tz=UTC),
+                price=price,
+                epoch=epoch,
+            )
+
+        direction = Direction.LONG
+        swing = SwingPoint(
+            kind="low",
+            price=100.0,
+            candle_start_epoch=100,
+            candle_end_epoch=160,
+            index=2,
+            confirmed_at_epoch=280,
+        )
+        structure = SwingPoint(
+            kind="high",
+            price=110.0,
+            candle_start_epoch=0,
+            candle_end_epoch=60,
+            index=0,
+            confirmed_at_epoch=180,
+        )
+        sweep = LiquiditySweep(
+            direction=direction,
+            swept_level=100.0,
+            sweep_candle_start_epoch=300,
+            sweep_candle_end_epoch=360,
+            sweep_candle_low=98.0,
+            sweep_candle_high=103.0,
+            sweep_candle_close=102.0,
+            swing=swing,
+        )
+        msb = MarketStructureBreak(
+            direction=direction,
+            broken_level=structure.price,
+            msb_candle_start_epoch=420,
+            msb_candle_end_epoch=480,
+            msb_candle_close=112.0,
+            bars_after_sweep=1,
+            structure_swing=structure,
+        )
+        disp = Displacement(
+            direction=direction,
+            candle_start_epoch=480,
+            candle_end_epoch=540,
+            open=112.0,
+            high=120.0,
+            low=111.0,
+            close=119.0,
+            body=7.0,
+            range_=9.0,
+            body_range_ratio=7 / 9,
+            body_atr_ratio=1.0,
+            atr=5.0,
+        )
+        fvg = FairValueGap(
+            direction=direction,
+            gap_low=115.0,
+            gap_high=117.0,
+            size=2.0,
+            size_atr_ratio=0.4,
+            candle1_start_epoch=480,
+            candle2_start_epoch=540,
+            candle3_start_epoch=600,
+            candle3_end_epoch=660,
+        )
+        m15 = M15Context(
+            last_m15_start_epoch=None,
+            last_m15_end_epoch=None,
+            last_m15_close=None,
+            recent_high=None,
+            recent_low=None,
+            directional_bias=None,
+        )
+        signal = StrategySignal(
+            instrument="vol75",
+            direction=direction,
+            signal_epoch=1000,
+            timeframe_context="M15+M1",
+            sweep=sweep,
+            msb=msb,
+            displacement=disp,
+            fvg=fvg,
+            m15_context=m15,
+        )
+        candidate = TradeCandidate(
+            instrument="vol75",
+            direction=direction,
+            signal_epoch=1000,
+            entry_price=105.0,
+            entry_zone_low=104.0,
+            entry_zone_high=106.0,
+            stop_loss=95.0,
+            take_profit=125.0,
+            risk_distance=10.0,
+            reward_distance=20.0,
+            risk_reward=2.0,
+            risk_percent=0.01,
+            risk_amount=100.0,
+            position_size=10.0,
+            source_signal=signal,
+        )
+        sim = TradeSimulationResult(
+            instrument="vol75",
+            direction=direction,
+            signal_epoch=1000,
+            outcome=SimulationOutcome.TIMEOUT,
+            filled=True,
+            entry_time=1010,
+            entry_price=105.0,
+            exit_time=1100,
+            exit_price=None,
+            exit_reason=ExitReason.TIMEOUT,
+            duration_seconds=90,
+            candidate=candidate,
+        )
+        ticks = [
+            tick(1005, 200.0),  # pre-fill extreme — must NOT count
+            tick(1010, 105.0),  # fill
+            tick(1020, 110.0),  # +5 favorable
+            tick(1030, 103.0),  # -2 adverse
+            tick(1090, 112.0),  # +7 favorable (max MFE)
+            tick(1100, 111.0),  # exit boundary
+            tick(1110, 300.0),  # post-exit extreme — must NOT count
+        ]
+        metrics = ResearchMetricsCalculator().calculate(sim, ticks)
+        assert metrics.mfe == pytest.approx(7.0)
+        assert metrics.mae == pytest.approx(2.0)
+        assert metrics.observation_start == 1010
+        assert metrics.observation_end == 1100
+
+
+class TestCLIExecution:
+    def test_cli_help_and_missing_output(self):
+        from smb.research.__main__ import main
+
+        with pytest.raises(SystemExit) as exc:
+            main(["run-horizon-exit-study", "--help"])
+        assert exc.value.code == 0
+
+        # missing required --output
+        with pytest.raises(SystemExit) as exc2:
+            main(["run-horizon-exit-study"])
+        assert exc2.value.code == 2
+
+    def test_cli_empty_data_returns_error(self, tmp_path: Path):
+        from smb.research.__main__ import main
+
+        # Nonexistent data root should fail with experiment/missing data
+        code = main(
+            [
+                "run-horizon-exit-study",
+                "--output",
+                str(tmp_path / "out"),
+                "--data-root",
+                str(tmp_path / "no_such_data"),
+                "--instruments",
+                "volatility_75_1s",
+            ]
+        )
+        assert code != 0

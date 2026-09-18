@@ -395,6 +395,22 @@ def cmd_run_horizon_exit_study(args: argparse.Namespace) -> int:
     extended_horizon = (
         int(args.extended_duration) if args.extended_duration is not None else None
     )
+    from smb.research.horizon_exit_study import FROZEN_BASELINE_HORIZON_SECONDS
+
+    if horizon != FROZEN_BASELINE_HORIZON_SECONDS:
+        print(
+            f"NOTE: --max-duration={horizon} differs from frozen baseline "
+            f"{FROZEN_BASELINE_HORIZON_SECONDS}s; baseline_preserved will be False "
+            f"(exploratory primary horizon).",
+            file=sys.stderr,
+        )
+    if extended_horizon is not None and extended_horizon <= horizon:
+        print(
+            f"NOTE: --extended-duration={extended_horizon} is not greater than "
+            f"primary horizon {horizon}; extended scenario will be not_estimable.",
+            file=sys.stderr,
+        )
+        extended_horizon = None
 
     results = []
     extended_results = []

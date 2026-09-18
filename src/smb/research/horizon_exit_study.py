@@ -33,8 +33,11 @@ SCENARIO_BASELINE = "baseline"
 SCENARIO_EXPLORATORY = "exploratory"
 SCENARIO_DESCRIPTIVE = "descriptive"
 SCENARIO_NOT_ESTIMABLE = "not_estimable"
-STUDY_VERSION = "6b.1"
+STUDY_VERSION = "6b.2"
 DEFAULT_BASELINE_HORIZON_SECONDS = 900
+# Canonical frozen production-research baseline horizon (seconds).
+# Analysis at any other horizon is exploratory and must not claim baseline_preserved.
+FROZEN_BASELINE_HORIZON_SECONDS = DEFAULT_BASELINE_HORIZON_SECONDS
 MIN_FILLED_FOR_STABLE_RATES = 10
 MIN_TIMEOUT_FOR_EXCURSION = 3
 
@@ -233,6 +236,11 @@ class HorizonExitStudyReport:
     configuration: dict[str, Any]
     dataset_audit: dict[str, Any]
     baseline_preserved: bool
+    """True only when the primary analysis horizon equals the frozen 900s baseline."""
+    is_canonical_baseline_run: bool
+    """Whether analysis_horizon_seconds == FROZEN_BASELINE_HORIZON_SECONDS."""
+    analysis_horizon_seconds: int
+    canonical_baseline_horizon_seconds: int
     instruments: tuple[InstrumentStudyResult, ...]
     pooled_notes: tuple[str, ...]
     leakage_review: tuple[str, ...]
@@ -246,6 +254,9 @@ class HorizonExitStudyReport:
             "configuration": dict(self.configuration),
             "dataset_audit": dict(self.dataset_audit),
             "baseline_preserved": self.baseline_preserved,
+            "is_canonical_baseline_run": self.is_canonical_baseline_run,
+            "analysis_horizon_seconds": self.analysis_horizon_seconds,
+            "canonical_baseline_horizon_seconds": self.canonical_baseline_horizon_seconds,
             "instruments": [i.to_dict() for i in self.instruments],
             "pooled_notes": list(self.pooled_notes),
             "leakage_review": list(self.leakage_review),
@@ -448,6 +459,22 @@ def analyze_timeouts(
 
 
 def target_reachability_summary(records: Sequence[StudyTradeRecord]) -> dict[str, Any]:
+    """Pre-terminal-exit MFE reachability vs actual target distance.
+
+    MFE is measured only within the simulation observation window
+    (fill → exit/horizon). Therefore:
+
+    - **TP**: MFE ≥ target is largely expected (path reached TP by definition for
+      touch fills that exit at the target); still reported for audit.
+    - **SL**: MFE ≥ target means the path touched the target *before* stopping
+      out; path-dependent, not a post-SL credit.
+    - **TIMEOUT**: the primary informative cell — path never hit TP or SL, but
+      MFE may or may not have reached the configured target distance within
+      the horizon.
+
+    This metric is **pre-terminal-exit MFE reachability**, not an alternative
+    exit rule and not post-exit path continuation.
+    """
     filled = [r for r in records if r.filled and r.mfe_target_ratio is not None]
     n = len(filled)
     reached = sum(
@@ -456,18 +483,122 @@ def target_reachability_summary(records: Sequence[StudyTradeRecord]) -> dict[str
         if r.mfe_target_ratio is not None and r.mfe_target_ratio >= 1.0
     )
     ratios = [r.mfe_target_ratio for r in filled if r.mfe_target_ratio is not None]
+    by_outcome: dict[str, dict[str, Any]] = {}
+    for outcome_key in (
+        SimulationOutcome.TP.value,
+        SimulationOutcome.SL.value,
+        SimulationOutcome.TIMEOUT.value,
+    ):
+        subset = [r for r in filled if r.outcome == outcome_key]
+        n_sub = len(subset)
+        n_reach = sum(
+            1
+            for r in subset
+            if r.mfe_target_ratio is not None and r.mfe_target_ratio >= 1.0
+        )
+        by_outcome[outcome_key] = {
+            "n_eligible": n_sub,
+            "n_mfe_reached_target": n_reach,
+            "pct_mfe_reached_target": _pct(n_reach, n_sub),
+        }
     return {
+        "metric_name": "pre_terminal_exit_mfe_target_reachability",
         "n_eligible": n,
         "n_mfe_reached_target": reached,
         "pct_mfe_reached_target": _pct(reached, n),
+        "by_outcome": by_outcome,
         "mfe_target_ratio_distribution": (
             distribution(ratios).to_dict() if ratios else None  # type: ignore[arg-type]
         ),
         "notes": [
-            "Target reachability uses actual candidate reward_distance (target distance), "
-            "not a reconstructed RR from config.",
-            "MFE >= target_distance does not imply a TP fill (path may reverse before TP).",
-            "This is a descriptive scenario, not an alternative exit rule.",
+            "Pre-terminal-exit MFE reachability: MFE is bounded by the simulation "
+            "observation window (fill → exit/horizon), not post-exit path.",
+            "Uses actual candidate reward_distance (target distance), not reconstructed RR.",
+            "TP rows: MFE ≥ target is largely tautological under touch-TP fills.",
+            "SL rows: MFE ≥ target means the path touched the target before the stop; "
+            "not a credit after the SL exit.",
+            "TIMEOUT rows: informative — neither TP nor SL hit; MFE may still reach the target.",
+            "Descriptive only; not an alternative exit rule.",
+        ],
+    }
+
+
+
+def _trade_key(r: StudyTradeRecord) -> tuple[str, int, str]:
+    return (r.instrument, int(r.signal_epoch), str(r.direction))
+
+
+def paired_horizon_comparison(
+    baseline_records: Sequence[StudyTradeRecord],
+    extended_records: Sequence[StudyTradeRecord],
+) -> dict[str, Any]:
+    """Compare the same accepted-trade cohort across two horizons.
+
+    Matches on (instrument, signal_epoch, direction). Reports outcome transitions
+    for the paired filled cohort, especially baseline TIMEOUT → extended TP/SL.
+
+    Independent aggregation of the extended run is insufficient: cohort
+    differences (e.g. different NO_FILL) must not masquerade as horizon effects.
+    """
+    base_map = {_trade_key(r): r for r in baseline_records if r.exclusion_reason != "rejected"}
+    ext_map = {_trade_key(r): r for r in extended_records if r.exclusion_reason != "rejected"}
+    shared_keys = sorted(set(base_map) & set(ext_map))
+    only_base = sorted(set(base_map) - set(ext_map))
+    only_ext = sorted(set(ext_map) - set(base_map))
+
+    transitions: dict[str, int] = {}
+    timeout_to_tp = 0
+    timeout_to_sl = 0
+    timeout_to_timeout = 0
+    timeout_to_other = 0
+    paired_filled = 0
+
+    for key in shared_keys:
+        b = base_map[key]
+        e = ext_map[key]
+        trans = f"{b.outcome}->{e.outcome}"
+        transitions[trans] = transitions.get(trans, 0) + 1
+        if b.filled and e.filled:
+            paired_filled += 1
+        if b.outcome == SimulationOutcome.TIMEOUT.value:
+            if e.outcome == SimulationOutcome.TP.value:
+                timeout_to_tp += 1
+            elif e.outcome == SimulationOutcome.SL.value:
+                timeout_to_sl += 1
+            elif e.outcome == SimulationOutcome.TIMEOUT.value:
+                timeout_to_timeout += 1
+            else:
+                timeout_to_other += 1
+
+    n_base_timeout = sum(
+        1 for r in base_map.values() if r.outcome == SimulationOutcome.TIMEOUT.value
+    )
+    n_shared_timeout = sum(
+        1
+        for k in shared_keys
+        if base_map[k].outcome == SimulationOutcome.TIMEOUT.value
+    )
+
+    return {
+        "pairing_key": ["instrument", "signal_epoch", "direction"],
+        "n_baseline_accepted_like": len(base_map),
+        "n_extended_accepted_like": len(ext_map),
+        "n_shared": len(shared_keys),
+        "n_only_baseline": len(only_base),
+        "n_only_extended": len(only_ext),
+        "n_paired_filled": paired_filled,
+        "n_baseline_timeout": n_base_timeout,
+        "n_shared_baseline_timeout": n_shared_timeout,
+        "timeout_to_tp": timeout_to_tp,
+        "timeout_to_sl": timeout_to_sl,
+        "timeout_to_timeout": timeout_to_timeout,
+        "timeout_to_other": timeout_to_other,
+        "outcome_transitions": dict(sorted(transitions.items())),
+        "notes": [
+            "Paired comparison uses the same signal cohort keys; unpaired rows "
+            "are reported but excluded from transition counts.",
+            "TIMEOUT→TP/SL conversions are the primary horizon-adequacy signal.",
+            "Independent extended aggregation alone is not used as a horizon effect claim.",
         ],
     }
 
@@ -482,22 +613,54 @@ def build_scenarios(
     extended_records: Sequence[StudyTradeRecord] | None = None,
 ) -> tuple[ScenarioResult, ...]:
     scenarios: list[ScenarioResult] = []
-    scenarios.append(
-        ScenarioResult(
-            scenario_id="baseline_horizon",
-            label=SCENARIO_BASELINE,
-            title="Existing baseline simulation horizon",
-            description=(
-                f"Outcomes under the frozen baseline simulation horizon of "
-                f"{horizon_seconds}s. Production simulation semantics unchanged."
-            ),
-            limitations=(
-                "Small filled-trade samples yield high-variance rates.",
-                "TIMEOUT mixes path incompleteness with true non-touch within horizon.",
-            ),
-            metrics={"horizon_seconds": horizon_seconds, "outcomes": outcomes.to_dict()},
+    is_canonical = horizon_seconds == FROZEN_BASELINE_HORIZON_SECONDS
+    if is_canonical:
+        scenarios.append(
+            ScenarioResult(
+                scenario_id="baseline_horizon",
+                label=SCENARIO_BASELINE,
+                title="Frozen baseline simulation horizon (900s)",
+                description=(
+                    f"Outcomes under the frozen canonical baseline horizon of "
+                    f"{FROZEN_BASELINE_HORIZON_SECONDS}s. Production simulation "
+                    "semantics unchanged."
+                ),
+                limitations=(
+                    "Small filled-trade samples yield high-variance rates.",
+                    "TIMEOUT mixes path incompleteness with true non-touch within horizon.",
+                ),
+                metrics={
+                    "horizon_seconds": horizon_seconds,
+                    "canonical_baseline_horizon_seconds": FROZEN_BASELINE_HORIZON_SECONDS,
+                    "is_canonical_baseline": True,
+                    "outcomes": outcomes.to_dict(),
+                },
+            )
         )
-    )
+    else:
+        scenarios.append(
+            ScenarioResult(
+                scenario_id="primary_horizon",
+                label=SCENARIO_EXPLORATORY,
+                title=f"Exploratory primary horizon ({horizon_seconds}s)",
+                description=(
+                    f"Primary analysis horizon is {horizon_seconds}s, which differs "
+                    f"from the frozen canonical baseline "
+                    f"({FROZEN_BASELINE_HORIZON_SECONDS}s). This run is exploratory "
+                    "and does not preserve the baseline configuration."
+                ),
+                limitations=(
+                    "Not the frozen 900s baseline; baseline_preserved must be False.",
+                    "Do not treat exploratory-horizon rates as baseline results.",
+                ),
+                metrics={
+                    "horizon_seconds": horizon_seconds,
+                    "canonical_baseline_horizon_seconds": FROZEN_BASELINE_HORIZON_SECONDS,
+                    "is_canonical_baseline": False,
+                    "outcomes": outcomes.to_dict(),
+                },
+            )
+        )
     partial = threshold_reach(records, thresholds, use_mfe_r=True)
     scenarios.append(
         ScenarioResult(
@@ -530,46 +693,63 @@ def build_scenarios(
             metrics={k: v for k, v in reach.items() if k != "notes"},
         )
     )
-    if extended_horizon_seconds is None or extended_records is None:
+    if (
+        extended_horizon_seconds is None
+        or extended_records is None
+        or extended_horizon_seconds <= horizon_seconds
+    ):
+        reason = "not_run"
+        if (
+            extended_horizon_seconds is not None
+            and extended_horizon_seconds <= horizon_seconds
+        ):
+            reason = "extended_not_greater_than_primary"
         scenarios.append(
             ScenarioResult(
                 scenario_id="extended_horizon_comparison",
                 label=SCENARIO_NOT_ESTIMABLE,
                 title="Extended-horizon comparison",
                 description=(
-                    "Optional re-simulation at a longer horizon was not requested "
-                    "or dataset coverage was insufficient."
+                    "Optional re-simulation at a longer horizon was not requested, "
+                    "was not strictly longer than the primary horizon, or coverage "
+                    "was insufficient."
                 ),
                 limitations=(
-                    "Extended horizon requires sufficient post-entry tick coverage "
-                    "beyond the baseline horizon; outcomes beyond available data "
-                    "are not fabricated.",
+                    "Extended horizon requires extended_duration > primary horizon "
+                    "and sufficient post-entry tick coverage; outcomes beyond "
+                    "available data are not fabricated.",
                     "When not run, this scenario is explicitly not estimable.",
                 ),
-                metrics={"status": "not_run"},
+                metrics={"status": reason},
             )
         )
     else:
         ext_outcomes = count_outcomes(extended_records)
+        paired = paired_horizon_comparison(records, extended_records)
         scenarios.append(
             ScenarioResult(
                 scenario_id="extended_horizon_comparison",
                 label=SCENARIO_EXPLORATORY,
                 title=f"Extended-horizon comparison ({extended_horizon_seconds}s)",
                 description=(
-                    f"Isolated research re-simulation at {extended_horizon_seconds}s. "
-                    "Does not replace the baseline. Not a production configuration."
+                    f"Paired research re-simulation at {extended_horizon_seconds}s "
+                    f"vs primary {horizon_seconds}s on the same signal cohort "
+                    "(instrument, signal_epoch, direction). Reports TIMEOUT→TP/SL "
+                    "conversions. Does not replace the baseline."
                 ),
                 limitations=(
                     "Exploratory only; sample sizes remain small.",
                     "Longer horizon can only convert TIMEOUT→TP/SL when post-entry "
                     "ticks exist in the store; otherwise TIMEOUT persists.",
+                    "Unpaired signals (present in only one run) are excluded from "
+                    "transition counts.",
                 ),
                 metrics={
-                    "baseline_horizon_seconds": horizon_seconds,
+                    "primary_horizon_seconds": horizon_seconds,
                     "extended_horizon_seconds": extended_horizon_seconds,
-                    "baseline_outcomes": outcomes.to_dict(),
+                    "primary_outcomes": outcomes.to_dict(),
                     "extended_outcomes": ext_outcomes.to_dict(),
+                    "paired_comparison": paired,
                 },
             )
         )
@@ -810,6 +990,7 @@ def analyze_horizon_exit_study(
     no_fill_all = sum(
         1 for r in all_records if r.outcome == SimulationOutcome.NO_FILL.value
     )
+    is_canonical = horizon_seconds == FROZEN_BASELINE_HORIZON_SECONDS
     audit = {
         "instruments": instruments_found,
         "total_signals": total_signals,
@@ -818,22 +999,31 @@ def analyze_horizon_exit_study(
         "total_study_records": len(all_records),
         "total_filled": filled_all,
         "total_no_fill": no_fill_all,
-        "baseline_horizon_seconds": horizon_seconds,
+        "analysis_horizon_seconds": horizon_seconds,
+        "canonical_baseline_horizon_seconds": FROZEN_BASELINE_HORIZON_SECONDS,
+        "is_canonical_baseline_run": is_canonical,
         "extended_horizon_seconds": extended_horizon_seconds,
-        "extended_run": extended_results is not None,
+        "extended_run": extended_results is not None
+        and extended_horizon_seconds is not None
+        and extended_horizon_seconds > horizon_seconds,
         "r_thresholds": list(thresholds),
     }
     return HorizonExitStudyReport(
         study_version=STUDY_VERSION,
         study_title="Milestone 6B — Horizon-Aware Trade Construction & Exit Study",
         configuration={
-            "baseline_horizon_seconds": horizon_seconds,
+            "analysis_horizon_seconds": horizon_seconds,
+            "canonical_baseline_horizon_seconds": FROZEN_BASELINE_HORIZON_SECONDS,
+            "is_canonical_baseline_run": is_canonical,
             "extended_horizon_seconds": extended_horizon_seconds,
             "r_thresholds": list(thresholds),
             "study_version": STUDY_VERSION,
         },
         dataset_audit=audit,
-        baseline_preserved=True,
+        baseline_preserved=is_canonical,
+        is_canonical_baseline_run=is_canonical,
+        analysis_horizon_seconds=horizon_seconds,
+        canonical_baseline_horizon_seconds=FROZEN_BASELINE_HORIZON_SECONDS,
         instruments=tuple(inst_results),
         pooled_notes=(
             "Instrument results are reported separately; do not pool in a way that "
@@ -885,7 +1075,18 @@ def format_horizon_exit_study_report(report: HorizonExitStudyReport) -> str:
         "Alternative exit or horizon views are labeled exploratory or descriptive."
     )
     lines.append("")
-    lines.append(f"- Baseline preserved: **{report.baseline_preserved}**")
+    lines.append(
+        f"- Baseline preserved: **{report.baseline_preserved}** "
+        f"(True only when analysis horizon is the frozen "
+        f"{report.canonical_baseline_horizon_seconds}s baseline)"
+    )
+    lines.append(
+        f"- Canonical baseline horizon (s): **{report.canonical_baseline_horizon_seconds}**"
+    )
+    lines.append(
+        f"- Analysis horizon (s): **{report.analysis_horizon_seconds}** "
+        f"(canonical run: **{report.is_canonical_baseline_run}**)"
+    )
     lines.append(
         f"- Production execution unchanged: **{report.production_execution_unchanged}**"
     )
