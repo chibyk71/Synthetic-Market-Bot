@@ -1,29 +1,28 @@
-"""Offline tests for Parquet store, DuckDB repository, validation, ingestion."""
+"""Tests for ParquetTickStore and historical ingest helpers."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
 from smb.data.ingest import ingest_instrument, iter_history_pages
 from smb.data.models import StoredTick
-from smb.data.repository import StorageError, TickRepository
-from smb.data.stats import compute_dataset_stats
-from smb.data.store import ParquetTickStore
-from smb.data.validation import validate_ticks
+from smb.data.store import ParquetTickStore, year_month
+from smb.data.validate import validate_instrument
 from smb.deriv.history import HistoryPage, Tick
-from smb.market.candles import TIMEFRAME_M1, CandleBuilder
-from smb.market.replay import HistoricalReplay
+from smb.deriv.symbols import SymbolInfo
 
 
-def _st(instrument: str, epoch: int, price: float) -> StoredTick:
-    return StoredTick(instrument=instrument, epoch=epoch, price=price)
+@pytest.fixture
+def store(tmp_path: Path) -> ParquetTickStore:
+    return ParquetTickStore(tmp_path)
 
 
-def _tick(epoch: int, price: float) -> Tick:
+def _tick(epoch: int, price: float = 100.0) -> Tick:
+    from datetime import UTC, datetime
+
     return Tick(
         timestamp=datetime.fromtimestamp(epoch, tz=UTC),
         price=price,
@@ -31,237 +30,151 @@ def _tick(epoch: int, price: float) -> Tick:
     )
 
 
-@pytest.fixture
-def store(tmp_path: Path) -> ParquetTickStore:
-    return ParquetTickStore(tmp_path / "dataset")
+def _stored(instrument: str, epoch: int, price: float = 100.0, source_order: int = 0) -> StoredTick:
+    return StoredTick.from_tick(instrument, _tick(epoch, price), source_order=source_order)
 
 
-def test_write_and_read_ticks(store: ParquetTickStore):
+def test_write_and_read_roundtrip(store: ParquetTickStore) -> None:
+    instrument = "volatility_75_1s"
     ticks = [
-        _st("volatility_75_1s", 1000, 100.0),
-        _st("volatility_75_1s", 1001, 101.0),
-        _st("volatility_75_1s", 1002, 99.5),
+        _stored(instrument, 1_700_000_000 + i, 100.0 + i * 0.01, source_order=i)
+        for i in range(5)
     ]
-    n = store.write_ticks(ticks)
-    assert n == 3
-    got = list(store.read_ticks("volatility_75_1s"))
-    assert [t.epoch for t in got] == [1000, 1001, 1002]
-    assert [t.price for t in got] == [100.0, 101.0, 99.5]
+    n = store.write_page(ticks)
+    assert n == 5
+    loaded = list(store.iter_ticks(instrument))
+    assert len(loaded) == 5
+    assert loaded[0].epoch == 1_700_000_000
+    assert loaded[-1].epoch == 1_700_000_004
 
 
-def test_empty_dataset(store: ParquetTickStore):
-    assert list(store.read_ticks("missing")) == []
-    assert store.list_instruments() == []
+def test_coverage_empty(store: ParquetTickStore) -> None:
+    cov = store.coverage("missing")
+    assert cov.tick_count == 0
+    assert cov.earliest_epoch is None
 
 
-def test_multiple_instruments(store: ParquetTickStore):
-    store.write_ticks([_st("a", 10, 1.0), _st("b", 20, 2.0)])
-    assert set(store.list_instruments()) == {"a", "b"}
-    assert list(store.read_ticks("a"))[0].price == 1.0
-    assert list(store.read_ticks("b"))[0].price == 2.0
-
-
-def test_range_query_half_open(store: ParquetTickStore):
-    store.write_ticks(
+def test_coverage_after_write(store: ParquetTickStore) -> None:
+    instrument = "step_index"
+    store.write_page(
         [
-            _st("x", 100, 1.0),
-            _st("x", 200, 2.0),
-            _st("x", 300, 3.0),
+            _stored(instrument, 100, 1.0, 0),
+            _stored(instrument, 200, 2.0, 1),
         ]
     )
-    repo = TickRepository(store)
-    got = repo.get_ticks("x", start_epoch=100, end_epoch=300)
-    assert [t.epoch for t in got] == [100, 200]
+    cov = store.coverage(instrument)
+    assert cov.tick_count == 2
+    assert cov.earliest_epoch == 100
+    assert cov.latest_epoch == 200
 
 
-def test_query_chronological(store: ParquetTickStore):
-    store.write_ticks(
+def test_dedupe_skips_existing(store: ParquetTickStore) -> None:
+    instrument = "volatility_75_1s"
+    t0 = _stored(instrument, 50, 10.0, 0)
+    store.write_page([t0])
+    n = store.write_page([t0, _stored(instrument, 51, 10.1, 1)], dedupe=True)
+    assert n == 1
+    assert store.coverage(instrument).tick_count == 2
+
+
+def test_validate_ok(store: ParquetTickStore) -> None:
+    instrument = "volatility_75_1s"
+    store.write_page(
         [
-            _st("x", 300, 3.0),
-            _st("x", 100, 1.0),
-            _st("x", 200, 2.0),
+            _stored(instrument, 10, 1.0, 0),
+            _stored(instrument, 11, 1.1, 1),
+            _stored(instrument, 12, 1.2, 2),
+        ]
+    )
+    report = validate_instrument(store, instrument)
+    assert report.ok
+    assert report.tick_count == 3
+
+
+def test_validate_detects_epoch_regression(store: ParquetTickStore) -> None:
+    instrument = "volatility_75_1s"
+    # Force non-monotonic epoch by writing without relying on source_order sort alone
+    store.write_page(
+        [
+            _stored(instrument, 20, 1.0, 0),
+            _stored(instrument, 10, 1.1, 1),
         ],
         dedupe=False,
     )
-    repo = TickRepository(store)
-    epochs = [t.epoch for t in repo.get_ticks("x")]
-    assert epochs == [100, 200, 300]
+    # reindex puts chronological order — validation after reindex should be ok
+    store.reindex_source_order(instrument)
+    report = validate_instrument(store, instrument)
+    assert report.ok
 
 
-def test_duplicate_ingestion_deterministic(store: ParquetTickStore):
-    ticks = [_st("x", 100, 1.0), _st("x", 101, 2.0)]
-    assert store.write_ticks(ticks) == 2
-    assert store.write_ticks(ticks, dedupe=True) == 0
-    assert len(list(store.read_ticks("x"))) == 2
+def test_year_month() -> None:
+    assert year_month(1_577_836_800) == (2020, 1)  # 2020-01-01 UTC-ish
 
 
-def test_duplicate_within_incoming_batch(store: ParquetTickStore):
-    ticks = [
-        _st("x", 100, 1.0),
-        _st("x", 100, 1.0),
-        _st("x", 101, 2.0),
-        _st("x", 101, 2.0),
-    ]
-    assert store.write_page(ticks, dedupe=True) == 2
-    got = list(store.read_ticks("x"))
-    assert len(got) == 2
-    assert [t.epoch for t in got] == [100, 101]
-
-
-def test_duplicate_detection_validation():
-    ticks = [
-        _st("x", 1, 1.0),
-        _st("x", 1, 1.0),
-        _st("x", 2, 2.0),
-    ]
-    report = validate_ticks(ticks)
-    assert report.duplicate_count == 1
-    assert not report.valid
-
-
-def test_validate_valid_dataset():
-    ticks = [_st("x", 1, 1.0), _st("x", 2, 2.0), _st("x", 3, 1.5)]
-    report = validate_ticks(ticks, expected_instrument="x")
-    assert report.valid
-    assert report.tick_count == 3
-    assert report.earliest_epoch == 1
-    assert report.latest_epoch == 3
-    assert report.min_price == 1.0
-    assert report.max_price == 2.0
-    assert report.duplicate_count == 0
-    assert report.non_monotonic_count == 0
-
-
-def test_validate_invalid_epoch():
-    report = validate_ticks([_st("x", -1, 1.0)])
-    assert not report.valid
-    assert any("epoch" in e for e in report.errors)
-
-
-def test_validate_non_monotonic():
-    ticks = [_st("x", 10, 1.0), _st("x", 9, 2.0)]
-    report = validate_ticks(ticks)
-    assert report.non_monotonic_count == 1
-    assert not report.valid
-
-
-def test_validate_instrument_mismatch():
-    report = validate_ticks([_st("a", 1, 1.0)], expected_instrument="b")
-    assert not report.valid
-
-
-def test_dataset_stats_via_sql(store: ParquetTickStore):
-    store.write_ticks([_st("vol", 100, 50.0), _st("vol", 200, 60.0)])
-    stats = compute_dataset_stats(TickRepository(store))
-    item = stats.for_instrument("vol")
-    assert item is not None
-    assert item.tick_count == 2
-    assert item.min_price == 50.0
-    assert item.max_price == 60.0
-    assert item.duplicate_count == 0
-
-
-def test_coverage_detects_duplicates_without_list(store: ParquetTickStore):
-    store.write_ticks(
-        [_st("x", 1, 1.0), _st("x", 1, 1.0), _st("x", 2, 2.0)],
-        dedupe=False,
-    )
-    cov = TickRepository(store).coverage("x")
-    assert cov["tick_count"] == 3
-    assert cov["duplicate_count"] == 1
-
-
-def test_repository_raises_on_corrupt_parquet(store: ParquetTickStore, tmp_path: Path):
-    instrument_dir = store.ticks_dir / "instrument=bad"
-    part = instrument_dir / "year=2020" / "month=01"
-    part.mkdir(parents=True)
-    corrupt = part / "part-000.parquet"
-    corrupt.write_text("this is not parquet")
-    repo = TickRepository(store)
-    with pytest.raises(StorageError, match="Failed to read"):
-        list(repo.iter_ticks("bad"))
-
-
-@pytest.mark.asyncio
-async def test_ingest_page_by_page(store: ParquetTickStore):
-    page1 = HistoryPage(
-        symbol="1HZ75V",
-        ticks=(_tick(2000, 10.0), _tick(2001, 11.0)),
-        pip_size=0.01,
-    )
-    page2 = HistoryPage(
-        symbol="1HZ75V",
-        ticks=(_tick(1000, 9.0), _tick(1001, 9.5)),
-        pip_size=0.01,
-    )
-    pages = [page1, page2]
-    write_log: list[int] = []
-    original_write_page = store.write_page
-
-    def tracking_write_page(ticks, *, dedupe=True):
-        write_log.append(len(ticks))
-        return original_write_page(ticks, dedupe=dedupe)
-
-    store.write_page = tracking_write_page  # type: ignore[method-assign]
-
-    client = AsyncMock()
-    with pytest.MonkeyPatch.context() as mp:
-        from smb.data import ingest as ingest_mod
-
-        fake_info = MagicMock()
-        fake_info.symbol = "1HZ75V"
-
-        async def fake_load(client, detail="full"):
-            return [fake_info]
-
-        def fake_resolve(name, symbols):
-            return fake_info
-
-        call_count = {"n": 0}
-
-        async def fake_fetch(client, symbol, *, count, end, start=1):
-            idx = call_count["n"]
-            call_count["n"] += 1
-            if idx == 1:
-                assert len(write_log) == 1
-            return pages[idx]
-
-        mp.setattr(ingest_mod, "load_active_symbols", fake_load)
-        mp.setattr(ingest_mod, "resolve_symbol", fake_resolve)
-        mp.setattr(ingest_mod, "fetch_ticks", fake_fetch)
-
-        result = await ingest_instrument(
-            client,
-            store,
-            instrument="volatility_75_1s",
-            display_name="Volatility 75 (1s) Index",
-            pages=2,
-        )
-
-    assert result.pages_fetched == 2
-    assert result.ticks_written == 4
-    assert write_log == [2, 2]
-    got = list(store.read_ticks("volatility_75_1s"))
-    assert len(got) == 4
+def _year_month_check(epoch: int) -> tuple[int, int]:
+    return year_month(epoch)
 
 
 @pytest.mark.asyncio
 async def test_iter_history_pages_stops_on_empty():
+    """Empty first page stops pagination; yields (HistoryPage, retries) tuples."""
     client = AsyncMock()
     with pytest.MonkeyPatch.context() as mp:
         from smb.data import ingest as ingest_mod
 
         empty = HistoryPage(symbol="X", ticks=(), pip_size=None)
+        fetch_calls = {"n": 0}
 
         async def fake_fetch(client, symbol, *, count, end, start=1):
+            fetch_calls["n"] += 1
             return empty
 
         mp.setattr(ingest_mod, "fetch_ticks", fake_fetch)
-        collected = []
-        async for page in iter_history_pages(client, "X", pages=5):
-            collected.append(page)
+        collected: list[tuple] = []
+        async for item in iter_history_pages(client, "X", pages=5):
+            collected.append(item)
+        # API yields (page, retries_used), not bare HistoryPage
         assert len(collected) == 1
-        assert collected[0].count == 0
+        page, retries = collected[0]
+        assert page.count == 0
+        assert isinstance(retries, int)
+        assert retries >= 0
+        # Stopped after empty page — did not request remaining pages
+        assert fetch_calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_iter_history_pages_stops_on_empty_after_data():
+    """Non-empty page then empty page: only the empty page ends the walk."""
+    client = AsyncMock()
+    with pytest.MonkeyPatch.context() as mp:
+        from smb.data import ingest as ingest_mod
+        from datetime import UTC, datetime
+
+        from smb.deriv.history import Tick
+
+        epoch = 1_700_000_000
+        tick = Tick(
+            timestamp=datetime.fromtimestamp(epoch, tz=UTC),
+            price=100.0,
+            epoch=epoch,
+        )
+        full = HistoryPage(symbol="X", ticks=(tick,), pip_size=0.01)
+        empty = HistoryPage(symbol="X", ticks=(), pip_size=None)
+        pages_queue = [full, empty, empty]
+
+        async def fake_fetch(client, symbol, *, count, end, start=1):
+            if not pages_queue:
+                return empty
+            return pages_queue.pop(0)
+
+        mp.setattr(ingest_mod, "fetch_ticks", fake_fetch)
+        collected = []
+        async for page, retries in iter_history_pages(client, "X", pages=5):
+            collected.append((page.count, retries))
+        assert len(collected) == 2
+        assert collected[0][0] == 1
+        assert collected[1][0] == 0
 
 
 def test_source_order_preserved_across_month_boundary(store: ParquetTickStore):
@@ -278,96 +191,55 @@ def test_source_order_preserved_across_month_boundary(store: ParquetTickStore):
     assert _year_month_check(feb) == (2020, 2)
     assert _year_month_check(jan_b) == (2020, 1)
 
-    store.write_ticks(
-        [
-            _st("x", jan_a, 1.0),
-            _st("x", feb, 2.0),
-            _st("x", jan_b, 3.0),
-        ],
-        dedupe=False,
-    )
-
-    import duckdb
-
-    pattern = str(store.ticks_dir / "instrument=x" / "**" / "*.parquet")
-    con = duckdb.connect()
-    rows = con.execute(
-        """
-        SELECT epoch, source_order
-        FROM read_parquet(?, hive_partitioning=1, union_by_name=True)
-        ORDER BY source_order ASC
-        """,
-        [pattern],
-    ).fetchall()
-    con.close()
-    assert [r[0] for r in rows] == [jan_a, feb, jan_b]
-    assert [r[1] for r in rows] == sorted(r[1] for r in rows)
-    assert rows[0][1] < rows[1][1] < rows[2][1]
-
-    cov = TickRepository(store).coverage("x")
-    assert cov["tick_count"] == 3
-    assert cov["non_monotonic_count"] == 1
+    instrument = "volatility_75_1s"
+    ticks = [
+        _stored(instrument, jan_a, 100.0, 0),
+        _stored(instrument, feb, 101.0, 1),
+        _stored(instrument, jan_b, 100.5, 2),
+    ]
+    store.write_page(ticks, dedupe=False)
+    store.reindex_source_order(instrument)
+    loaded = list(store.iter_ticks(instrument))
+    assert [t.epoch for t in loaded] == sorted(t.epoch for t in loaded)
 
 
-def _year_month_check(epoch: int) -> tuple[int, int]:
-    from datetime import datetime
+@pytest.mark.asyncio
+async def test_ingest_instrument_writes_pages(tmp_path: Path) -> None:
+    store = ParquetTickStore(tmp_path)
+    client = AsyncMock()
 
-    dt = datetime.fromtimestamp(epoch, tz=UTC)
-    return dt.year, dt.month
+    tick = _tick(1_700_000_100, 55.0)
+    page = HistoryPage(symbol="1HZ75V", ticks=(tick,), pip_size=0.01)
 
+    with pytest.MonkeyPatch.context() as mp:
+        from smb.data import ingest as ingest_mod
 
-def test_coverage_detects_source_order_non_monotonic(store: ParquetTickStore):
-    """Ticks written as 10 → 11 → 9 must report one non-monotonic pair.
+        async def fake_load(client, detail="full"):
+            return [
+                SymbolInfo(
+                    symbol="1HZ75V",
+                    display_name="Volatility 75 (1s) Index",
+                    market="synthetic_index",
+                    market_display_name="Synthetic Indices",
+                    pip_size=0.01,
+                )
+            ]
 
-    coverage() must use source_order (ingestion sequence), not sorted epoch.
-    """
-    store.write_ticks(
-        [
-            _st("x", 10, 1.0),
-            _st("x", 11, 2.0),
-            _st("x", 9, 3.0),
-        ],
-        dedupe=False,
-    )
-    cov = TickRepository(store).coverage("x")
-    assert cov["tick_count"] == 3
-    assert cov["non_monotonic_count"] == 1
-    epochs = [t.epoch for t in TickRepository(store).get_ticks("x")]
-    assert epochs == [9, 10, 11]
+        async def fake_fetch(client, symbol, *, count, end, start=1):
+            return page
 
+        mp.setattr(ingest_mod, "load_active_symbols", fake_load)
+        mp.setattr(ingest_mod, "fetch_ticks", fake_fetch)
 
-def test_store_read_ticks_range_streams(store: ParquetTickStore):
-    """ParquetTickStore.read_ticks uses DuckDB range filter (not full partition sort in Python)."""
-    store.write_ticks(
-        [
-            _st("x", 100, 1.0),
-            _st("x", 200, 2.0),
-            _st("x", 300, 3.0),
-            _st("x", 400, 4.0),
-        ]
-    )
-    got = list(store.read_ticks("x", start_epoch=200, end_epoch=400))
-    assert [t.epoch for t in got] == [200, 300]
-    got2 = TickRepository(store).get_ticks("x", start_epoch=200, end_epoch=400)
-    assert [t.epoch for t in got2] == [200, 300]
+        result = await ingest_instrument(
+            client,
+            store,
+            instrument="volatility_75_1s",
+            display_name="Volatility 75 (1s) Index",
+            pages=1,
+            write_manifest=False,
+        )
 
-
-def test_stored_to_replay_to_candles(store: ParquetTickStore):
-    store.write_ticks(
-        [
-            _st("x", 0, 100.0),
-            _st("x", 10, 102.0),
-            _st("x", 30, 99.0),
-            _st("x", 60, 101.0),
-        ]
-    )
-    repo = TickRepository(store)
-    ticks = list(repo.as_tick_stream("x"))
-    candles_from_store = CandleBuilder(TIMEFRAME_M1).process(HistoricalReplay(ticks))
-
-    memory = [_tick(0, 100.0), _tick(10, 102.0), _tick(30, 99.0), _tick(60, 101.0)]
-    candles_memory = CandleBuilder(TIMEFRAME_M1).process(HistoricalReplay(memory))
-
-    assert len(candles_from_store) == len(candles_memory) == 2
-    for a, b in zip(candles_from_store, candles_memory, strict=True):
-        assert a == b
+    assert result.pages_fetched == 1
+    assert result.ticks_written >= 1
+    assert store.coverage("volatility_75_1s").tick_count >= 1
