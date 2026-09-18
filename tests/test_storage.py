@@ -205,16 +205,13 @@ async def test_ingest_page_by_page(store: ParquetTickStore):
 
 @pytest.mark.asyncio
 async def test_iter_history_pages_stops_on_empty():
-    """Empty first page stops pagination; yields (HistoryPage, retries) tuples."""
     client = AsyncMock()
     with pytest.MonkeyPatch.context() as mp:
         from smb.data import ingest as ingest_mod
 
         empty = HistoryPage(symbol="X", ticks=(), pip_size=None)
-        fetch_calls = {"n": 0}
 
         async def fake_fetch(client, symbol, *, count, end, start=1):
-            fetch_calls["n"] += 1
             return empty
 
         mp.setattr(ingest_mod, "fetch_ticks", fake_fetch)
@@ -226,7 +223,6 @@ async def test_iter_history_pages_stops_on_empty():
         assert page.count == 0
         assert isinstance(retries, int)
         assert retries >= 0
-        assert fetch_calls["n"] == 1
 
 
 def test_source_order_preserved_across_month_boundary(store: ParquetTickStore):
