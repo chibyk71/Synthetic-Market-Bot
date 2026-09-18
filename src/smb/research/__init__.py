@@ -133,6 +133,7 @@ __all__ += [
     "write_diagnostic_artifacts",
 ]
 
+
 from smb.research.horizon_exit_study import (  # noqa: E402
     DEFAULT_BASELINE_HORIZON_SECONDS,
     DEFAULT_INSTRUMENTS,
