@@ -258,10 +258,13 @@ async def test_iter_history_pages_stops_on_empty():
 
         mp.setattr(ingest_mod, "fetch_ticks", fake_fetch)
         collected = []
-        async for page in iter_history_pages(client, "X", pages=5):
-            collected.append(page)
+        async for page, retries in iter_history_pages(client, "X", pages=5):
+            collected.append((page, retries))
         assert len(collected) == 1
-        assert collected[0].count == 0
+        page, retries = collected[0]
+        assert page.count == 0
+        assert isinstance(retries, int)
+        assert retries >= 0
 
 
 def test_source_order_preserved_across_month_boundary(store: ParquetTickStore):

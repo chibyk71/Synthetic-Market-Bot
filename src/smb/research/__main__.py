@@ -6,6 +6,7 @@ Commands:
   run-baseline-campaign  Campaign + Milestone 5B baseline analysis
   run-expanded-baseline  Milestone 5D: execute baseline on expanded data + compare to 5B
   run-baseline-diagnostics  Milestone 5F: structured baseline diagnostic research
+  run-predictive-evidence  Milestone 6A: real-data predictive evidence study
 
 Optional flags on run: --analysis / --analysis-json, --diagnostic / --diagnostic-json
 """
@@ -125,7 +126,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     if args.diagnostic or args.diagnostic_json:
         try:
-            from smb.research.diagnostic import (
+            from smb.research.diagnostic import (  # type: ignore[import-not-found]
                 BaselineDiagnosticCalculator,
                 format_diagnostic_report,
             )
@@ -303,6 +304,77 @@ def cmd_run_baseline_diagnostics(args: argparse.Namespace) -> int:
     return 0
 
 
+
+def cmd_run_predictive_evidence(args: argparse.Namespace) -> int:
+    """Milestone 6A: real-data predictive evidence study (frozen strategy)."""
+    from smb.research.experiment import ExperimentError, run_experiment
+    from smb.research.predictive_evidence import (
+        analyze_evidence,
+        evidence_rows_from_experiment_result,
+        format_predictive_evidence_report,
+        write_predictive_evidence_artifacts,
+    )
+    from smb.simulation.models import SimulationConfig
+
+    settings = _load_settings()
+    data_root = Path(args.data_root) if args.data_root else _data_root(settings)
+    instruments = args.instruments or ["volatility_75_1s", "step_index"]
+    output = Path(args.output)
+    rows = []
+    strategy_signals = 0
+    candidates_accepted = 0
+    candidates_rejected = 0
+    try:
+        for instrument in instruments:
+            result = run_experiment(
+                data_root,
+                instrument=instrument,
+                start_epoch=args.start,
+                end_epoch=args.end,
+                strategy=_strategy_from_settings(settings),
+                trade=_trade_from_settings(settings),
+                simulation=SimulationConfig(max_duration_seconds=args.max_duration),
+                risk_equity=args.equity,
+            )
+            rows.extend(evidence_rows_from_experiment_result(result))
+            strategy_signals += int(result.summary.signals)
+            candidates_accepted += int(result.summary.candidates_accepted)
+            candidates_rejected += int(result.summary.candidates_rejected)
+            print(
+                f"{instrument}: signals={result.summary.signals} "
+                f"accepted={result.summary.candidates_accepted} "
+                f"rejected={result.summary.candidates_rejected} "
+                f"evidence_rows={len(result.rows)}",
+                file=sys.stderr,
+            )
+    except ExperimentError as exc:
+        print(f"Experiment error: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        print(f"Predictive evidence failed: {exc}", file=sys.stderr)
+        return 1
+
+    report = analyze_evidence(
+        rows,
+        strategy_signals=strategy_signals,
+        candidates_accepted=candidates_accepted,
+        candidates_rejected=candidates_rejected,
+    )
+    json_path, md_path = write_predictive_evidence_artifacts(report, output)
+    print(format_predictive_evidence_report(report))
+    a = report.audit
+    print(
+        f"evidence complete: strategy_signals={a.strategy_signals} "
+        f"accepted={a.accepted_candidates} rejected={a.candidates_rejected} "
+        f"evidence_rows={a.evidence_rows_analyzed} "
+        f"labeled={a.labeled_closed_trades} TP={a.tp_count} SL={a.sl_count} "
+        f"TIMEOUT={a.timeout_count} NO_FILL={a.no_fill_count}",
+        file=sys.stderr,
+    )
+    print(f"artifacts: {json_path} , {md_path}", file=sys.stderr)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m smb.research")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -440,6 +512,33 @@ def main(argv: list[str] | None = None) -> int:
     p_diag.add_argument("--data-root", default=None, help="Override data root")
     p_diag.add_argument("--equity", type=float, default=10_000.0, help="Risk equity")
     p_diag.set_defaults(func=cmd_run_baseline_diagnostics)
+
+    p_pred = sub.add_parser(
+        "run-predictive-evidence",
+        help="Milestone 6A: real-data predictive evidence study (frozen strategy)",
+    )
+    p_pred.add_argument(
+        "--output",
+        required=True,
+        help="Output directory (predictive_evidence.json + predictive_evidence_report.md)",
+    )
+    p_pred.add_argument(
+        "--instruments",
+        nargs="+",
+        default=None,
+        help="Instrument keys (default: volatility_75_1s step_index)",
+    )
+    p_pred.add_argument("--start", type=int, default=None, help="start_epoch inclusive")
+    p_pred.add_argument("--end", type=int, default=None, help="end_epoch exclusive")
+    p_pred.add_argument("--data-root", default=None, help="Override data root")
+    p_pred.add_argument("--equity", type=float, default=10_000.0, help="Risk equity")
+    p_pred.add_argument(
+        "--max-duration",
+        type=int,
+        default=900,
+        help="Simulation max duration seconds (default 900)",
+    )
+    p_pred.set_defaults(func=cmd_run_predictive_evidence)
 
     args = parser.parse_args(argv)
     return int(args.func(args))
