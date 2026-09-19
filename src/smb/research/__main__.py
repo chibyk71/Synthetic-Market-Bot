@@ -7,6 +7,7 @@ Commands:
   run-expanded-baseline  Milestone 5D: execute baseline on expanded data + compare to 5B
   run-baseline-diagnostics  Milestone 5F: structured baseline diagnostic research
   run-predictive-evidence  Milestone 6A: real-data predictive evidence study
+  run-horizon-exit-study   Milestone 6B: horizon-aware trade construction & exit study
 
 Optional flags on run: --analysis / --analysis-json, --diagnostic / --diagnostic-json
 """
@@ -375,6 +376,127 @@ def cmd_run_predictive_evidence(args: argparse.Namespace) -> int:
     return 0
 
 
+
+def cmd_run_horizon_exit_study(args: argparse.Namespace) -> int:
+    """Milestone 6B: horizon-aware trade construction & exit study (frozen strategy)."""
+    from smb.research.experiment import ExperimentError, run_experiment
+    from smb.research.horizon_exit_study import (
+        DEFAULT_R_THRESHOLDS,
+        format_horizon_exit_study_report,
+        run_horizon_exit_study_on_results,
+    )
+    from smb.simulation.models import SimulationConfig
+
+    settings = _load_settings()
+    data_root = Path(args.data_root) if args.data_root else _data_root(settings)
+    instruments = args.instruments or ["volatility_75_1s", "step_index"]
+    output = Path(args.output)
+    horizon = int(args.max_duration)
+    extended_horizon = (
+        int(args.extended_duration) if args.extended_duration is not None else None
+    )
+    from smb.research.horizon_exit_study import FROZEN_BASELINE_HORIZON_SECONDS
+
+    if horizon != FROZEN_BASELINE_HORIZON_SECONDS:
+        print(
+            f"NOTE: --max-duration={horizon} differs from frozen baseline "
+            f"{FROZEN_BASELINE_HORIZON_SECONDS}s; baseline_preserved will be False "
+            f"(exploratory primary horizon).",
+            file=sys.stderr,
+        )
+    # Preserve the requested extended value for scenario status reporting even when
+    # it is not strictly greater than the primary horizon (analysis then labels
+    # status "extended_not_greater_than_primary" instead of a generic "not_run").
+    requested_extended = extended_horizon
+    if extended_horizon is not None and extended_horizon <= horizon:
+        print(
+            f"NOTE: --extended-duration={extended_horizon} is not greater than "
+            f"primary horizon {horizon}; extended scenario will be not_estimable "
+            f"(status=extended_not_greater_than_primary).",
+            file=sys.stderr,
+        )
+        extended_horizon = None  # do not re-run simulation
+
+    results = []
+    extended_results = []
+    try:
+        for instrument in instruments:
+            result = run_experiment(
+                data_root,
+                instrument=instrument,
+                start_epoch=args.start,
+                end_epoch=args.end,
+                strategy=_strategy_from_settings(settings),
+                trade=_trade_from_settings(settings),
+                simulation=SimulationConfig(max_duration_seconds=horizon),
+                risk_equity=args.equity,
+            )
+            results.append(result)
+            print(
+                f"{instrument}: signals={result.summary.signals} "
+                f"accepted={result.summary.candidates_accepted} "
+                f"rejected={result.summary.candidates_rejected} "
+                f"outcomes={dict(result.summary.outcomes)}",
+                file=sys.stderr,
+            )
+            if extended_horizon is not None and extended_horizon > horizon:
+                ext = run_experiment(
+                    data_root,
+                    instrument=instrument,
+                    start_epoch=args.start,
+                    end_epoch=args.end,
+                    strategy=_strategy_from_settings(settings),
+                    trade=_trade_from_settings(settings),
+                    simulation=SimulationConfig(max_duration_seconds=extended_horizon),
+                    risk_equity=args.equity,
+                )
+                extended_results.append(ext)
+                print(
+                    f"{instrument} extended@{extended_horizon}s: "
+                    f"outcomes={dict(ext.summary.outcomes)}",
+                    file=sys.stderr,
+                )
+    except ExperimentError as exc:
+        print(f"Experiment error: {exc}", file=sys.stderr)
+        return 2
+    except FileNotFoundError as exc:
+        print(f"Missing data: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        print(f"Horizon exit study failed: {exc}", file=sys.stderr)
+        return 1
+
+    if not results:
+        print("No experiment results; empty dataset or no instruments.", file=sys.stderr)
+        return 2
+
+    report = run_horizon_exit_study_on_results(
+        results,
+        output,
+        horizon_seconds=horizon,
+        thresholds=DEFAULT_R_THRESHOLDS,
+        extended_results=extended_results if extended_results else None,
+        # Pass the original requested duration so invalid (<= primary) requests
+        # surface as "extended_not_greater_than_primary", not a generic "not_run".
+        extended_horizon_seconds=requested_extended,
+    )
+    print(format_horizon_exit_study_report(report))
+    a = report.dataset_audit
+    print(
+        f"study complete: signals={a.get('total_signals')} "
+        f"accepted={a.get('total_accepted')} filled={a.get('total_filled')} "
+        f"no_fill={a.get('total_no_fill')} "
+        f"horizon={horizon}s",
+        file=sys.stderr,
+    )
+    print(
+        f"artifacts: {output / 'horizon_exit_study.json'} , "
+        f"{output / 'horizon_exit_study_report.md'}",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m smb.research")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -539,6 +661,43 @@ def main(argv: list[str] | None = None) -> int:
         help="Simulation max duration seconds (default 900)",
     )
     p_pred.set_defaults(func=cmd_run_predictive_evidence)
+
+    p_hz = sub.add_parser(
+        "run-horizon-exit-study",
+        help="Milestone 6B: horizon-aware trade construction & exit study (frozen strategy)",
+    )
+    p_hz.add_argument(
+        "--output",
+        required=True,
+        help="Output directory (horizon_exit_study.json + horizon_exit_study_report.md)",
+    )
+    p_hz.add_argument(
+        "--instruments",
+        nargs="+",
+        default=None,
+        help="Instrument keys (default: volatility_75_1s step_index)",
+    )
+    p_hz.add_argument("--start", type=int, default=None, help="start_epoch inclusive")
+    p_hz.add_argument("--end", type=int, default=None, help="end_epoch exclusive")
+    p_hz.add_argument("--data-root", default=None, help="Override data root")
+    p_hz.add_argument("--equity", type=float, default=10_000.0, help="Risk equity")
+    p_hz.add_argument(
+        "--max-duration",
+        type=int,
+        default=900,
+        help="Baseline simulation horizon seconds (default 900)",
+    )
+    p_hz.add_argument(
+        "--extended-duration",
+        type=int,
+        default=None,
+        help=(
+            "Optional exploratory longer horizon (seconds). "
+            "When set and greater than --max-duration, re-runs simulation "
+            "as an isolated research scenario only."
+        ),
+    )
+    p_hz.set_defaults(func=cmd_run_horizon_exit_study)
 
     args = parser.parse_args(argv)
     return int(args.func(args))
