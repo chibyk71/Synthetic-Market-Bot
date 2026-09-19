@@ -503,6 +503,7 @@ def cmd_run_strategy_filter_experiment(args: argparse.Namespace) -> int:
     from smb.research.experiment import ExperimentError, run_experiment
     from smb.research.strategy_filter_experiments import (
         DEFAULT_INSTRUMENTS,
+        FROZEN_BASELINE_HORIZON_SECONDS,
         ExperimentFamily,
         build_filter_config_from_args,
         format_filter_experiment_report,
@@ -521,6 +522,15 @@ def cmd_run_strategy_filter_experiment(args: argparse.Namespace) -> int:
     output = Path(args.output)
     instruments = list(args.instruments) if args.instruments else list(DEFAULT_INSTRUMENTS)
     horizon = int(args.max_duration)
+    if horizon != FROZEN_BASELINE_HORIZON_SECONDS:
+        print(
+            f"Invalid --max-duration={horizon}: Milestone 6C requires the frozen "
+            f"baseline horizon of {FROZEN_BASELINE_HORIZON_SECONDS}s. "
+            "Filter experiments analyze a frozen baseline and do not "
+            "reparameterize simulation exits.",
+            file=sys.stderr,
+        )
+        return 2
     data_root = Path(args.data_root) if args.data_root else None
 
     # Family-specific config (explicit; no silent fallback to another family)
@@ -836,7 +846,10 @@ def main(argv: list[str] | None = None) -> int:
         "--max-duration",
         type=int,
         default=900,
-        help="Baseline simulation horizon seconds (default 900)",
+        help=(
+            "Simulation horizon seconds (must equal frozen baseline 900; "
+            "other values are rejected)"
+        ),
     )
     # trend_direction options
     p_filt.add_argument(

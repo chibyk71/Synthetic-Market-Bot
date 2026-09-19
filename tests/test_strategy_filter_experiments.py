@@ -11,6 +11,7 @@ import pytest
 from smb.research.experiment import ExperimentResult, ExperimentSummary, TradeExperimentRow
 from smb.research.strategy_filter_experiments import (
     DEFAULT_BASELINE_HORIZON_SECONDS,
+    FROZEN_BASELINE_HORIZON_SECONDS,
     CohortStatus,
     DisplacementFVGQualityFilterConfig,
     ExperimentFamily,
@@ -302,6 +303,25 @@ def test_filter_experiment_config_rejects_bad_horizon() -> None:
             family=ExperimentFamily.TREND_DIRECTION,
             horizon_seconds=0,
         )
+
+
+def test_filter_experiment_config_rejects_non_frozen_horizon() -> None:
+    with pytest.raises(ValueError, match="frozen baseline"):
+        FilterExperimentConfig(
+            family=ExperimentFamily.TREND_DIRECTION,
+            horizon_seconds=300,
+        )
+    with pytest.raises(ValueError, match="frozen baseline"):
+        FilterExperimentConfig(
+            family=ExperimentFamily.TREND_DIRECTION,
+            horizon_seconds=1800,
+        )
+    # Frozen value is accepted
+    cfg = FilterExperimentConfig(
+        family=ExperimentFamily.TREND_DIRECTION,
+        horizon_seconds=FROZEN_BASELINE_HORIZON_SECONDS,
+    )
+    assert cfg.horizon_seconds == FROZEN_BASELINE_HORIZON_SECONDS
 
 
 # ---------------------------------------------------------------------------
@@ -854,6 +874,23 @@ def test_cli_invalid_experiment(tmp_path: Path) -> None:
             "not_a_real_filter",
             "--output",
             str(tmp_path),
+        ]
+    )
+    assert code == 2
+
+
+def test_cli_rejects_non_frozen_horizon(tmp_path: Path) -> None:
+    from smb.research.__main__ import main
+
+    code = main(
+        [
+            "run-strategy-filter-experiment",
+            "--experiment",
+            "trend_direction",
+            "--output",
+            str(tmp_path),
+            "--max-duration",
+            "300",
         ]
     )
     assert code == 2
