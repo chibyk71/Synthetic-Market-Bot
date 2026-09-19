@@ -9,7 +9,6 @@ Commands:
   run-predictive-evidence  Milestone 6A: real-data predictive evidence study
   run-horizon-exit-study   Milestone 6B: horizon-aware trade construction & exit study
   run-strategy-filter-experiment  Milestone 6C: controlled strategy filter experiments
-  run-horizon-exit-study   Milestone 6B: horizon-aware trade construction & exit study
 
 Optional flags on run: --analysis / --analysis-json, --diagnostic / --diagnostic-json
 """

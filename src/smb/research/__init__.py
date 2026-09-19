@@ -174,47 +174,6 @@ __all__ += [
     "write_horizon_exit_study_artifacts",
 ]
 
-
-from smb.research.horizon_exit_study import (  # noqa: E402
-    DEFAULT_BASELINE_HORIZON_SECONDS,
-    DEFAULT_INSTRUMENTS,
-    DEFAULT_R_THRESHOLDS,
-    FROZEN_BASELINE_HORIZON_SECONDS,
-    HorizonExitStudyReport,
-    InstrumentStudyResult,
-    OutcomeCounts,
-    ScenarioResult,
-    StudyTradeRecord,
-    analyze_horizon_exit_study,
-    analyze_instrument,
-    format_horizon_exit_study_report,
-    paired_horizon_comparison,
-    records_from_experiment_result,
-    run_horizon_exit_study_on_results,
-    study_record_from_row,
-    write_horizon_exit_study_artifacts,
-)
-
-__all__ += [
-    "DEFAULT_BASELINE_HORIZON_SECONDS",
-    "FROZEN_BASELINE_HORIZON_SECONDS",
-    "DEFAULT_INSTRUMENTS",
-    "DEFAULT_R_THRESHOLDS",
-    "HorizonExitStudyReport",
-    "InstrumentStudyResult",
-    "OutcomeCounts",
-    "ScenarioResult",
-    "StudyTradeRecord",
-    "analyze_horizon_exit_study",
-    "paired_horizon_comparison",
-    "analyze_instrument",
-    "format_horizon_exit_study_report",
-    "records_from_experiment_result",
-    "run_horizon_exit_study_on_results",
-    "study_record_from_row",
-    "write_horizon_exit_study_artifacts",
-]
-
 from smb.research.strategy_filter_experiments import (  # noqa: E402
     DEFAULT_INSTRUMENTS as FILTER_DEFAULT_INSTRUMENTS,
 )
