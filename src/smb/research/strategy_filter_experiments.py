@@ -31,11 +31,15 @@ from smb.strategy.models import Direction
 
 logger = logging.getLogger(__name__)
 
-STUDY_VERSION = "6c.1"
+STUDY_VERSION = "6c.2"
 INSTRUMENT_V75 = "volatility_75_1s"
 INSTRUMENT_STEP = "step_index"
 DEFAULT_INSTRUMENTS: tuple[str, ...] = (INSTRUMENT_V75, INSTRUMENT_STEP)
+# Frozen production-research baseline horizon. 6C compares filters against
+# experiment rows produced at this horizon only — it does not reparameterize
+# simulation exits. Any other horizon value is rejected.
 DEFAULT_BASELINE_HORIZON_SECONDS = 900
+FROZEN_BASELINE_HORIZON_SECONDS = DEFAULT_BASELINE_HORIZON_SECONDS
 MIN_FILLED_FOR_STABLE_RATES = 10
 MIN_SIGNALS_FOR_STABLE_COVERAGE = 5
 SPARSE_SEGMENT_SIGNAL_THRESHOLD = 5
@@ -188,7 +192,13 @@ class SessionRegimeFilterConfig:
 
 @dataclass(frozen=True, slots=True)
 class FilterExperimentConfig:
-    """Single explicit experiment selection for one run."""
+    """Single explicit experiment selection for one run.
+
+    ``horizon_seconds`` is recorded for artifact provenance only and **must**
+    equal :data:`FROZEN_BASELINE_HORIZON_SECONDS`. Milestone 6C does not
+    re-simulate exits; filter cohorts are computed on experiment rows that
+    were produced at the frozen baseline horizon.
+    """
 
     family: ExperimentFamily
     trend: TrendDirectionFilterConfig = field(
@@ -203,7 +213,7 @@ class FilterExperimentConfig:
     session: SessionRegimeFilterConfig = field(
         default_factory=SessionRegimeFilterConfig
     )
-    horizon_seconds: int = DEFAULT_BASELINE_HORIZON_SECONDS
+    horizon_seconds: int = FROZEN_BASELINE_HORIZON_SECONDS
 
     def __post_init__(self) -> None:
         if not isinstance(self.family, ExperimentFamily):
@@ -214,6 +224,13 @@ class FilterExperimentConfig:
             or self.horizon_seconds <= 0
         ):
             raise ValueError("horizon_seconds must be a positive int")
+        if self.horizon_seconds != FROZEN_BASELINE_HORIZON_SECONDS:
+            raise ValueError(
+                f"horizon_seconds must equal frozen baseline "
+                f"{FROZEN_BASELINE_HORIZON_SECONDS}s (got {self.horizon_seconds}); "
+                "Milestone 6C analyzes filters against a frozen baseline and "
+                "does not reparameterize simulation exits"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -617,7 +634,11 @@ def compute_cohort_metrics(
         "win_rate denominator = filled = TP + SL + TIMEOUT (NO_FILL excluded).",
         "realized R uses filled trades with finite realized_r only.",
         "MAE/MFE/duration distributions exclude NO_FILL and nonfinite values.",
-        "candidates_rejected are pre-filter risk/construction rejections.",
+        "candidates_accepted/rejected = trade-construction funnel "
+        "(pre-filter risk gate), not the strategy filter.",
+        "filter_retained/rejected/unavailable = selected filter classification "
+        "of this cohort's rows (on the baseline cohort these are the full "
+        "population funnel totals, not a post-filter trade count).",
     ]
 
     n = len(rows)
@@ -1030,6 +1051,8 @@ def analyze_filter_experiment(
 
     global_lims = [
         "Single explicitly selected experiment per run (no multi-filter search).",
+        f"Simulation horizon is frozen at {FROZEN_BASELINE_HORIZON_SECONDS}s; "
+        "6C does not reparameterize TP/SL/TIMEOUT exits when analyzing filters.",
         "Baseline simulation configuration is frozen for this comparison.",
         "Thresholds are configuration inputs, not optimized on this evaluation set.",
         RESEARCH_DISCLAIMER,
@@ -1136,7 +1159,8 @@ def format_filter_experiment_report(report: FilterExperimentReport) -> str:
         f"# Controlled Strategy Filter Experiment (Milestone 6C / {report.study_version})",
         "",
         f"**Experiment family:** `{report.family}`",
-        f"**Horizon (seconds):** {report.horizon_seconds}",
+        f"**Horizon (seconds):** {report.horizon_seconds} "
+        f"(frozen baseline; filter analysis does not re-simulate exits)",
         f"**Instruments:** {', '.join(report.instruments) or '(none)'}",
         "",
         "## Run configuration",
@@ -1203,23 +1227,35 @@ def format_filter_experiment_report(report: FilterExperimentReport) -> str:
         [
             "## Cohort definitions",
             "",
-            "- **Baseline cohort:** all strategy signals in the experiment "
-            "(accepted + construction-rejected).",
-            "- **Filter-retained cohort:** signals the selected filter keeps.",
+            "- **Baseline cohort:** the full strategy-signal population for the "
+            "run (construction-accepted + construction-rejected). Outcome and R "
+            "metrics on this block describe the unfiltered baseline.",
+            "- **Filter classification funnel (on baseline block):** "
+            "`filter_retained` / `filter_rejected` / `filter_unavailable` on the "
+            "baseline cohort are the selected filter's classification of the "
+            "*entire* signal population — not a count of baseline trades.",
+            "- **Filter-retained cohort:** signals the selected filter keeps; "
+            "outcome metrics here are the retained subset only.",
             "- **Filter-rejected cohort:** signals the selected filter rejects.",
             "- **Filter-unavailable cohort:** signals lacking required context "
             "or undecidable under the filter rule.",
+            "- **Construction funnel:** `candidates_accepted` / "
+            "`candidates_rejected` are the trade-construction gate "
+            "(independent of the strategy filter).",
             "- **NO_FILL:** accepted candidates that never filled; excluded from "
             "win rate and R / MAE / MFE / duration distributions.",
             "- **Executed outcomes:** TP / SL / TIMEOUT among filled trades.",
             "",
             "## Metric denominators",
             "",
-            "- Signal count = all strategy signals (baseline).",
+            "- Signal count = strategy signals in the cohort.",
             "- Candidate accepted/rejected = trade construction gate.",
-            "- Filter retained/rejected/unavailable partition the signal set.",
+            "- Filter retained/rejected/unavailable partition the signal set "
+            "(on baseline: full-population classification funnel).",
             "- Win rate = TP / (TP + SL + TIMEOUT).",
             "- Coverage/retention = cohort size / baseline signal count.",
+            f"- Simulation horizon is frozen at {FROZEN_BASELINE_HORIZON_SECONDS}s; "
+            "6C does not reparameterize exits.",
             "",
         ]
     )
@@ -1241,7 +1277,7 @@ def parse_experiment_family(name: str) -> ExperimentFamily:
 def build_filter_config_from_args(
     family: ExperimentFamily,
     *,
-    horizon_seconds: int = DEFAULT_BASELINE_HORIZON_SECONDS,
+    horizon_seconds: int = FROZEN_BASELINE_HORIZON_SECONDS,
     treat_neutral_as: str = "unavailable",
     treat_missing_as: str = "unavailable",
     min_close_range_position: float = 0.50,
@@ -1287,4 +1323,6 @@ def leakage_review_notes() -> tuple[str, ...]:
         "inside filter decision logic.",
         "Simulation and trade construction are unchanged from the baseline run.",
         "Thresholds are supplied a priori via configuration; not fit on outcomes.",
+        f"Horizon is frozen at {FROZEN_BASELINE_HORIZON_SECONDS}s; analysis does "
+        "not reparameterize simulation exits for filter comparisons.",
     )

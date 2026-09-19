@@ -178,6 +178,9 @@ from smb.research.strategy_filter_experiments import (  # noqa: E402
     DEFAULT_INSTRUMENTS as FILTER_DEFAULT_INSTRUMENTS,
 )
 from smb.research.strategy_filter_experiments import (  # noqa: E402
+    FROZEN_BASELINE_HORIZON_SECONDS as FILTER_FROZEN_BASELINE_HORIZON_SECONDS,
+)
+from smb.research.strategy_filter_experiments import (  # noqa: E402
     CohortMetrics,
     DisplacementFVGQualityFilterConfig,
     ExperimentFamily,
@@ -204,6 +207,7 @@ from smb.research.strategy_filter_experiments import (  # noqa: E402
 
 __all__ += [
     "FILTER_DEFAULT_INSTRUMENTS",
+    "FILTER_FROZEN_BASELINE_HORIZON_SECONDS",
     "CohortMetrics",
     "DisplacementFVGQualityFilterConfig",
     "ExperimentFamily",
