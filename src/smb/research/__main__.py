@@ -404,13 +404,18 @@ def cmd_run_horizon_exit_study(args: argparse.Namespace) -> int:
             f"(exploratory primary horizon).",
             file=sys.stderr,
         )
+    # Preserve the requested extended value for scenario status reporting even when
+    # it is not strictly greater than the primary horizon (analysis then labels
+    # status "extended_not_greater_than_primary" instead of a generic "not_run").
+    requested_extended = extended_horizon
     if extended_horizon is not None and extended_horizon <= horizon:
         print(
             f"NOTE: --extended-duration={extended_horizon} is not greater than "
-            f"primary horizon {horizon}; extended scenario will be not_estimable.",
+            f"primary horizon {horizon}; extended scenario will be not_estimable "
+            f"(status=extended_not_greater_than_primary).",
             file=sys.stderr,
         )
-        extended_horizon = None
+        extended_horizon = None  # do not re-run simulation
 
     results = []
     extended_results = []
@@ -471,7 +476,9 @@ def cmd_run_horizon_exit_study(args: argparse.Namespace) -> int:
         horizon_seconds=horizon,
         thresholds=DEFAULT_R_THRESHOLDS,
         extended_results=extended_results if extended_results else None,
-        extended_horizon_seconds=extended_horizon if extended_results else None,
+        # Pass the original requested duration so invalid (<= primary) requests
+        # surface as "extended_not_greater_than_primary", not a generic "not_run".
+        extended_horizon_seconds=requested_extended,
     )
     print(format_horizon_exit_study_report(report))
     a = report.dataset_audit
