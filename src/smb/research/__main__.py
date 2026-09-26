@@ -1,4 +1,4 @@
-"""CLI: python -m smb.research <command> — body zlib-transported."""
+"""CLI: python -m smb.research <command> - body zlib-transported."""
 from __future__ import annotations
 import base64, zlib
 _CHUNKS = []
