@@ -1,13 +1,16 @@
-"""Auto-generated zlib loader for src/smb/research/__main__.py."""
+"""CLI: python -m smb.research."""
 from __future__ import annotations
 import base64, sys, zlib
 from pathlib import Path
 from types import ModuleType
 
-_DATA = Path(__file__).with_name(Path(__file__).name.replace(".py", "_data.b64"))
-
 def _load() -> ModuleType:
-    blob = _DATA.read_text().strip()
+    parts = []
+    parts.append(Path(__file__).with_name("__main___data_0.b64").read_text().strip())
+    parts.append(Path(__file__).with_name("__main___data_1.b64").read_text().strip())
+    parts.append(Path(__file__).with_name("__main___data_2.b64").read_text().strip())
+    parts.append(Path(__file__).with_name("__main___data_3.b64").read_text().strip())
+    blob = "".join(parts)
     src = zlib.decompress(base64.b64decode(blob)).decode("utf-8")
     mod = ModuleType(__name__)
     mod.__file__ = __file__

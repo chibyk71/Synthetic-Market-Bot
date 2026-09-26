@@ -1,13 +1,15 @@
-"""Auto-generated zlib loader for tests/test_entry_edge_study.py."""
+"""Tests for Milestone 6C entry edge study."""
 from __future__ import annotations
 import base64, sys, zlib
 from pathlib import Path
 from types import ModuleType
 
-_DATA = Path(__file__).with_name(Path(__file__).name.replace(".py", "_data.b64"))
-
 def _load() -> ModuleType:
-    blob = _DATA.read_text().strip()
+    parts = []
+    parts.append(Path(__file__).with_name("test_entry_edge_study_data_0.b64").read_text().strip())
+    parts.append(Path(__file__).with_name("test_entry_edge_study_data_1.b64").read_text().strip())
+    parts.append(Path(__file__).with_name("test_entry_edge_study_data_2.b64").read_text().strip())
+    blob = "".join(parts)
     src = zlib.decompress(base64.b64decode(blob)).decode("utf-8")
     mod = ModuleType(__name__)
     mod.__file__ = __file__
