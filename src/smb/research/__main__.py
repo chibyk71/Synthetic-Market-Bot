@@ -10,6 +10,8 @@ def _load() -> ModuleType:
     parts.append(Path(__file__).with_name("__main___data_1.b64").read_text().strip())
     parts.append(Path(__file__).with_name("__main___data_2.b64").read_text().strip())
     parts.append(Path(__file__).with_name("__main___data_3.b64").read_text().strip())
+    parts.append(Path(__file__).with_name("__main___data_4.b64").read_text().strip())
+    parts.append(Path(__file__).with_name("__main___data_5.b64").read_text().strip())
     blob = "".join(parts)
     src = zlib.decompress(base64.b64decode(blob)).decode("utf-8")
     mod = ModuleType(__name__)
