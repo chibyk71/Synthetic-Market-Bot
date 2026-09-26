@@ -174,61 +174,6 @@ __all__ += [
     "write_horizon_exit_study_artifacts",
 ]
 
-from smb.research.strategy_filter_experiments import (  # noqa: E402
-    DEFAULT_INSTRUMENTS as FILTER_DEFAULT_INSTRUMENTS,
-)
-from smb.research.strategy_filter_experiments import (  # noqa: E402
-    FROZEN_BASELINE_HORIZON_SECONDS as FILTER_FROZEN_BASELINE_HORIZON_SECONDS,
-)
-from smb.research.strategy_filter_experiments import (  # noqa: E402
-    CohortMetrics,
-    DisplacementFVGQualityFilterConfig,
-    ExperimentFamily,
-    FilterDecision,
-    FilterDecisionKind,
-    FilterExperimentConfig,
-    FilterExperimentReport,
-    InstrumentFilterResult,
-    M15ContextFilterConfig,
-    SessionRegimeFilterConfig,
-    TrendDirectionFilterConfig,
-    analyze_filter_experiment,
-    analyze_instrument_filter,
-    build_filter_config_from_args,
-    evaluate_filter,
-    format_filter_experiment_report,
-    parse_experiment_family,
-    run_filter_experiment_on_results,
-    write_filter_experiment_artifacts,
-)
-from smb.research.strategy_filter_experiments import (  # noqa: E402
-    leakage_review_notes as filter_leakage_review_notes,
-)
-
-__all__ += [
-    "FILTER_DEFAULT_INSTRUMENTS",
-    "FILTER_FROZEN_BASELINE_HORIZON_SECONDS",
-    "CohortMetrics",
-    "DisplacementFVGQualityFilterConfig",
-    "ExperimentFamily",
-    "FilterDecision",
-    "FilterDecisionKind",
-    "FilterExperimentConfig",
-    "FilterExperimentReport",
-    "InstrumentFilterResult",
-    "M15ContextFilterConfig",
-    "SessionRegimeFilterConfig",
-    "TrendDirectionFilterConfig",
-    "analyze_filter_experiment",
-    "analyze_instrument_filter",
-    "build_filter_config_from_args",
-    "evaluate_filter",
-    "format_filter_experiment_report",
-    "filter_leakage_review_notes",
-    "parse_experiment_family",
-    "run_filter_experiment_on_results",
-    "write_filter_experiment_artifacts",
-]
 
 from smb.research.entry_edge_study import (  # noqa: E402
     BOOTSTRAP_RESAMPLES,
