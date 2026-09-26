@@ -229,3 +229,49 @@ __all__ += [
     "run_filter_experiment_on_results",
     "write_filter_experiment_artifacts",
 ]
+
+from smb.research.entry_edge_study import (  # noqa: E402
+    BOOTSTRAP_RESAMPLES,
+    BOOTSTRAP_SEED,
+    EXCURSION_TIMEPOINTS,
+    EXTENDED_CROSS_MARK_SECONDS,
+    PRIMARY_ENDPOINT_TIMEPOINT,
+    CohortIntegrityError,
+    CohortKey,
+    CostModel,
+    EntryEdgeStudyReport,
+    EntryEdgeTradeRecord,
+    analyze_entry_edge_study,
+    analyze_instrument_entry_edge,
+    format_entry_edge_study_report,
+    run_entry_edge_study_on_results,
+    verify_cohort_integrity,
+    write_entry_edge_study_artifacts,
+)
+from smb.research.entry_edge_study import (  # noqa: E402
+    STUDY_VERSION as ENTRY_EDGE_STUDY_VERSION,
+)
+from smb.research.entry_edge_study import (  # noqa: E402
+    record_from_row as entry_edge_record_from_row,
+)
+
+__all__ += [
+    "BOOTSTRAP_RESAMPLES",
+    "BOOTSTRAP_SEED",
+    "EXCURSION_TIMEPOINTS",
+    "EXTENDED_CROSS_MARK_SECONDS",
+    "PRIMARY_ENDPOINT_TIMEPOINT",
+    "ENTRY_EDGE_STUDY_VERSION",
+    "CohortIntegrityError",
+    "CohortKey",
+    "CostModel",
+    "EntryEdgeStudyReport",
+    "EntryEdgeTradeRecord",
+    "analyze_entry_edge_study",
+    "analyze_instrument_entry_edge",
+    "format_entry_edge_study_report",
+    "entry_edge_record_from_row",
+    "run_entry_edge_study_on_results",
+    "verify_cohort_integrity",
+    "write_entry_edge_study_artifacts",
+]
