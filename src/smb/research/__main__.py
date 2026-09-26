@@ -9,6 +9,7 @@ Commands:
   run-predictive-evidence  Milestone 6A: real-data predictive evidence study
   run-horizon-exit-study   Milestone 6B: horizon-aware trade construction & exit study
   run-strategy-filter-experiment  Milestone 6C: controlled strategy filter experiments
+  run-entry-edge-study     Milestone 6C: entry edge / early excursion study (frozen 6B cohort)
 
 Optional flags on run: --analysis / --analysis-json, --diagnostic / --diagnostic-json
 """
@@ -607,6 +608,221 @@ def cmd_run_strategy_filter_experiment(args: argparse.Namespace) -> int:
     return 0
 
 
+
+def cmd_run_entry_edge_study(args: argparse.Namespace) -> int:
+    """Milestone 6C: entry edge / early excursion study on the frozen 6B cohort.
+
+    Data pipeline:
+      historical ticks → experiment (signal cohort) → filled entry →
+      post-entry tick windows (30..300s) → MFE/MAE in R →
+      900s MTM + 1800s exploratory cross-mark → statistical analysis
+
+    Requires an independently persisted frozen 6B cohort
+    (``--baseline-cohort``) so integrity is not a self-comparison.
+    """
+    from smb.data.repository import TickRepository
+    from smb.data.store import ParquetTickStore
+    from smb.research.entry_edge_study import (
+        EXTENDED_CROSS_MARK_SECONDS,
+        FROZEN_BASELINE_HORIZON_SECONDS,
+        CohortIntegrityError,
+        CostModel,
+        cohort_keys_from_experiment_result,
+        compute_post_entry_diagnostics,
+        format_entry_edge_study_report,
+        load_cohort_keys,
+        run_entry_edge_study_on_results,
+        write_cohort_keys,
+        write_entry_edge_study_artifacts,
+    )
+    from smb.research.experiment import ExperimentError, run_experiment
+    from smb.simulation.models import SimulationConfig
+
+    settings = _load_settings()
+    data_root = Path(args.data_root) if args.data_root else _data_root(settings)
+    instruments = args.instruments or ["volatility_75_1s", "step_index"]
+    output = Path(args.output)
+    horizon = int(args.max_duration)
+    extended = (
+        int(args.extended_duration)
+        if args.extended_duration is not None
+        else EXTENDED_CROSS_MARK_SECONDS
+    )
+    spread_cost = float(args.spread_cost_r)
+
+    if horizon != FROZEN_BASELINE_HORIZON_SECONDS:
+        print(
+            f"NOTE: --max-duration={horizon} differs from frozen baseline "
+            f"{FROZEN_BASELINE_HORIZON_SECONDS}s; cohort should still match 6B keys.",
+            file=sys.stderr,
+        )
+
+    # --- Frozen 6B cohort (independent of the freshly generated study) ---
+    baseline_cohort_path = getattr(args, "baseline_cohort", None)
+    if not baseline_cohort_path:
+        print(
+            "ERROR: --baseline-cohort PATH is required. "
+            "Point it at a machine-readable frozen 6B cohort JSON "
+            "(export via --write-baseline-cohort on a prior matching run, "
+            "or from a 6B experiment artifact). "
+            "Self-comparison of the freshly generated experiment as its own "
+            "baseline is not allowed.",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        frozen_keys = load_cohort_keys(baseline_cohort_path)
+    except (FileNotFoundError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        print(f"ERROR: failed to load frozen 6B cohort: {exc}", file=sys.stderr)
+        return 2
+    print(
+        f"frozen 6B cohort: {baseline_cohort_path} ({len(frozen_keys)} keys)",
+        file=sys.stderr,
+    )
+    print(f"historical ticks: data_root={data_root}", file=sys.stderr)
+
+    results_by_inst: dict = {}
+    try:
+        for instrument in instruments:
+            result = run_experiment(
+                data_root,
+                instrument=instrument,
+                start_epoch=args.start,
+                end_epoch=args.end,
+                strategy=_strategy_from_settings(settings),
+                trade=_trade_from_settings(settings),
+                simulation=SimulationConfig(max_duration_seconds=horizon),
+                risk_equity=args.equity,
+            )
+            results_by_inst[instrument] = result
+            print(
+                f"{instrument}: signals={result.summary.signals} "
+                f"accepted={result.summary.candidates_accepted} "
+                f"outcomes={dict(result.summary.outcomes)}",
+                file=sys.stderr,
+            )
+            if extended > horizon:
+                print(
+                    f"{instrument}: extended@{extended}s cross-mark is exploratory only",
+                    file=sys.stderr,
+                )
+    except ExperimentError as exc:
+        print(f"Experiment error: {exc}", file=sys.stderr)
+        return 2
+    except FileNotFoundError as exc:
+        print(f"Missing data: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        print(f"Entry edge study failed: {exc}", file=sys.stderr)
+        return 1
+
+    if not results_by_inst:
+        print(
+            "No experiment results; empty dataset or no instruments.",
+            file=sys.stderr,
+        )
+        return 2
+
+    # Optional: export this run's cohort keys for use as a future frozen baseline
+    write_cohort_path = getattr(args, "write_baseline_cohort", None)
+    if write_cohort_path:
+        all_keys = []
+        for result in results_by_inst.values():
+            all_keys.extend(cohort_keys_from_experiment_result(result))
+        path = write_cohort_keys(
+            all_keys,
+            write_cohort_path,
+            source="experiment_export",
+            metadata={
+                "data_root": str(data_root),
+                "instruments": list(instruments),
+                "max_duration": horizon,
+            },
+        )
+        print(f"wrote cohort keys: {path} ({len(all_keys)} keys)", file=sys.stderr)
+
+    # --- Post-entry diagnostics from historical ticks ---
+    store = ParquetTickStore(data_root)
+    repo = TickRepository(store)
+    ticks_by_instrument: dict[str, list[tuple[int, float]]] = {}
+    all_rows = []
+    for instrument, result in results_by_inst.items():
+        all_rows.extend(result.rows)
+        filled_times = [
+            int(r.entry_time)
+            for r in result.rows
+            if r.entry_time is not None and r.accepted and r.outcome is not None
+        ]
+        if not filled_times:
+            ticks_by_instrument[instrument] = []
+            continue
+        start_ep = min(filled_times)
+        signal_eps = [int(r.signal_epoch) for r in result.rows]
+        end_bound = max(signal_eps) + max(extended, horizon) + 1
+        stored = repo.get_ticks(
+            instrument, start_epoch=start_ep, end_epoch=end_bound
+        )
+        ticks_by_instrument[instrument] = [(t.epoch, t.price) for t in stored]
+        print(
+            f"{instrument}: loaded {len(ticks_by_instrument[instrument])} post-entry ticks "
+            f"[{start_ep}, {end_bound})",
+            file=sys.stderr,
+        )
+
+    early_by_key, mtm_by_key, coverage_audit = compute_post_entry_diagnostics(
+        all_rows,
+        ticks_by_instrument,
+        horizon_900=horizon,
+        horizon_1800=extended,
+    )
+    print(
+        f"post-entry diagnostics: filled={coverage_audit['n_filled_for_diagnostics']} "
+        f"excursion_complete={coverage_audit['n_excursion_complete']} "
+        f"mtm_900={coverage_audit['n_mtm_900_observed']} "
+        f"mtm_1800={coverage_audit['n_mtm_1800_observed']}",
+        file=sys.stderr,
+    )
+    if (
+        coverage_audit["n_filled_for_diagnostics"] > 0
+        and coverage_audit["n_excursion_complete"] == 0
+        and coverage_audit["n_excursion_partial_coverage"] == 0
+    ):
+        print(
+            "WARNING: filled trades present but no early-excursion observations "
+            "could be computed (insufficient tick coverage after entry).",
+            file=sys.stderr,
+        )
+
+    cost_model = CostModel(canonical_spread_cost_r=spread_cost)
+    try:
+        report = run_entry_edge_study_on_results(
+            results_by_inst,
+            baseline_keys=frozen_keys,
+            cost_model=cost_model,
+            early_excursions_by_key=early_by_key,
+            mtm_by_key=mtm_by_key,
+            coverage_audit=coverage_audit,
+        )
+    except CohortIntegrityError as exc:
+        print(f"Cohort integrity failure vs frozen 6B: {exc}", file=sys.stderr)
+        return 2
+
+    write_entry_edge_study_artifacts(report, output)
+    print(format_entry_edge_study_report(report))
+    for ir in report.instruments:
+        print(
+            f"{ir.instrument}: filled={ir.n_filled} verdict={ir.verdict} "
+            f"primary_median={ir.bootstrap_primary.observed_median}",
+            file=sys.stderr,
+        )
+    print(
+        f"artifacts: {output / 'entry_edge_study.json'} , "
+        f"{output / 'entry_edge_study_report.md'}",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m smb.research")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -906,6 +1122,71 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     p_filt.set_defaults(func=cmd_run_strategy_filter_experiment)
+
+
+    p_ee = sub.add_parser(
+        "run-entry-edge-study",
+        help=(
+            "Milestone 6C: entry edge / early excursion study "
+            "(frozen 6B cohort; research-only)"
+        ),
+    )
+    p_ee.add_argument(
+        "--output",
+        required=True,
+        help="Output directory (entry_edge_study.json + entry_edge_study_report.md)",
+    )
+    p_ee.add_argument(
+        "--instruments",
+        nargs="+",
+        default=None,
+        help="Instrument keys (default: volatility_75_1s step_index)",
+    )
+    p_ee.add_argument("--start", type=int, default=None, help="start_epoch inclusive")
+    p_ee.add_argument("--end", type=int, default=None, help="end_epoch exclusive")
+    p_ee.add_argument("--data-root", default=None, help="Override data root")
+    p_ee.add_argument("--equity", type=float, default=10_000.0, help="Risk equity")
+    p_ee.add_argument(
+        "--max-duration",
+        type=int,
+        default=900,
+        help="Baseline simulation horizon seconds (default 900; must match frozen 6B)",
+    )
+    p_ee.add_argument(
+        "--extended-duration",
+        type=int,
+        default=1800,
+        help=(
+            "Exploratory 1800s cross-mark horizon (default 1800). "
+            "Optimistic bound only; never a production exit rule."
+        ),
+    )
+    p_ee.add_argument(
+        "--spread-cost-r",
+        type=float,
+        default=0.05,
+        help="Canonical spread cost in R units (default 0.05)",
+    )
+    p_ee.add_argument(
+        "--baseline-cohort",
+        required=True,
+        metavar="PATH",
+        help=(
+            "Path to frozen 6B cohort JSON (keys: instrument, signal_epoch, direction). "
+            "Required — the CLI will not self-compare a freshly generated experiment "
+            "as its own baseline. Export via --write-baseline-cohort on a prior run."
+        ),
+    )
+    p_ee.add_argument(
+        "--write-baseline-cohort",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Optional: write this run's signal cohort keys to PATH for use as a "
+            "future --baseline-cohort (research utility only)."
+        ),
+    )
+    p_ee.set_defaults(func=cmd_run_entry_edge_study)
 
     args = parser.parse_args(argv)
     return int(args.func(args))
