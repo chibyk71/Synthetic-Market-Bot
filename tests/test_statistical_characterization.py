@@ -291,7 +291,7 @@ def test_frozen_lags_match_preregistered() -> None:
 def test_characterize_strong_persistence_detects_or_not() -> None:
     # Strong AR-like walk: should still produce a valid overall state
     prices = [100.0]
-    for i in range(300):
+    for _i in range(300):
         prices.append(prices[-1] + 0.5)
     result = characterize_instrument("trend", _series(prices))
     assert result.overall in (
