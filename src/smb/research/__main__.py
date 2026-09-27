@@ -613,9 +613,11 @@ def cmd_run_statistical_characterization(args: argparse.Namespace) -> int:
     """Milestone 6D: instrument statistical characterization (research-only)."""
     from smb.research.statistical_characterization import (
         DEFAULT_INSTRUMENTS,
+        DEFAULT_SEED,
         FROZEN_STUDY_CONFIG,
         StudyConfiguration,
         format_markdown_report,
+        resolve_pip_size_from_settings,
         run_statistical_characterization,
         write_artifacts,
     )
@@ -626,8 +628,15 @@ def cmd_run_statistical_characterization(args: argparse.Namespace) -> int:
     output = Path(args.output)
 
     config = FROZEN_STUDY_CONFIG
-    if args.seed is not None and args.seed != config.seed:
-        config = StudyConfiguration(seed=int(args.seed))
+    actual_seed = DEFAULT_SEED
+    if args.seed is not None:
+        actual_seed = int(args.seed)
+        if actual_seed != DEFAULT_SEED:
+            config = StudyConfiguration(seed=actual_seed)
+
+    pip_sizes = {
+        inst: resolve_pip_size_from_settings(inst, settings) for inst in instruments
+    }
 
     report = run_statistical_characterization(
         data_root=data_root,
@@ -635,11 +644,21 @@ def cmd_run_statistical_characterization(args: argparse.Namespace) -> int:
         start_epoch=args.start,
         end_epoch=args.end,
         config=config,
+        pip_sizes=pip_sizes,
+        settings=settings,
+        actual_seed=actual_seed,
     )
+    if not report.canonical:
+        print(
+            f"WARNING: non-canonical run "
+            f"(actual_seed={report.actual_seed}, canonical_seed={report.canonical_seed})",
+            file=sys.stderr,
+        )
     json_path, md_path = write_artifacts(report, output)
     print(format_markdown_report(report))
     print(
         f"study complete: overall={report.overall_synthesis} "
+        f"canonical={report.canonical} "
         f"instruments={len(report.instruments)}",
         file=sys.stderr,
     )

@@ -7,11 +7,17 @@ live/demo execution, or production baselines.
 Preregistered structures (each instrument independently):
   Gate A — directional dependence (ACF of signed increments)
   Gate B — volatility dependence (ACF of abs / squared increments)
-  Gate C — directional transitions and run lengths
+  Gate C — extreme-move response (primary horizon)
   Gate D — overall synthesis
 
-Detection requires BOTH statistical significance AND a frozen
+Primary inferential family (Holm-Bonferroni, m = 28):
+  9 directional ACF + 9 absolute-return ACF + 9 squared-return ACF
+  + 1 extreme-move direction-adjusted response test
+
+Detection requires BOTH multiple-testing-adjusted significance AND a frozen
 minimum-effect-size floor.
+
+Transition probabilities and run statistics are descriptive/supporting only.
 
 Correct negative language:
   "no measurable structure was detected under the preregistered tests
@@ -31,8 +37,6 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from smb.data.repository import TickRepository
-from smb.data.store import ParquetTickStore
 from smb.research.stats import percentile
 
 # ---------------------------------------------------------------------------
@@ -40,21 +44,29 @@ from smb.research.stats import percentile
 # ---------------------------------------------------------------------------
 
 STUDY_ID = "milestone-6d-statistical-characterization"
-STUDY_VERSION = "6d.1"
+STUDY_VERSION = "6d.2"
 DEFAULT_SEED = 20260927
 ACF_LAGS: tuple[int, ...] = (1, 2, 5, 10, 30, 60, 120, 300, 600)
 EXTREME_MOVE_WINDOW = 300
 EXTREME_MOVE_THRESHOLD_SIGMA = 3.0
 FUTURE_RESPONSE_HORIZONS: tuple[int, ...] = (1, 5, 10, 30, 60, 180, 300)
+# Primary Gate C horizon (single inferential horizon; others descriptive)
+PRIMARY_EXTREME_HORIZON = 30
 NULL_SIMULATIONS = 100
 SIGNIFICANCE_LEVEL = 0.05
 MINIMUM_EFFECT_SIZE_ACF = 0.02
-MINIMUM_EFFECT_SIZE_TRANSITION = 0.03
+MINIMUM_EFFECT_SIZE_TRANSITION = 0.03  # descriptive comparisons only
+# Relative effect floor: |mean dir-adj future return| / mean(|increment|)
+MINIMUM_EFFECT_SIZE_EXTREME = 0.10
 MIN_OBSERVATIONS_FOR_ACF = 50
 MIN_TRANSITION_PAIRS = 30
 MIN_RUNS_PER_DIRECTION = 10
 MIN_EXTREME_EVENTS = 20
 MIN_TICKS_FOR_STUDY = 100
+
+MULTIPLICITY_METHOD = "holm_bonferroni"
+# 9 dir + 9 abs + 9 sq + 1 extreme primary = 28
+PRIMARY_FAMILY_SIZE = 28
 
 INSTRUMENT_V75 = "volatility_75_1s"
 INSTRUMENT_STEP = "step_index"
@@ -81,20 +93,26 @@ class StudyConfiguration:
     extreme_move_window: int = EXTREME_MOVE_WINDOW
     extreme_move_threshold_sigma: float = EXTREME_MOVE_THRESHOLD_SIGMA
     future_response_horizons: tuple[int, ...] = FUTURE_RESPONSE_HORIZONS
+    primary_extreme_horizon: int = PRIMARY_EXTREME_HORIZON
     null_simulations: int = NULL_SIMULATIONS
     significance_level: float = SIGNIFICANCE_LEVEL
     minimum_effect_size_acf: float = MINIMUM_EFFECT_SIZE_ACF
     minimum_effect_size_transition: float = MINIMUM_EFFECT_SIZE_TRANSITION
+    minimum_effect_size_extreme: float = MINIMUM_EFFECT_SIZE_EXTREME
     min_observations_for_acf: int = MIN_OBSERVATIONS_FOR_ACF
     min_transition_pairs: int = MIN_TRANSITION_PAIRS
     min_runs_per_direction: int = MIN_RUNS_PER_DIRECTION
     min_extreme_events: int = MIN_EXTREME_EVENTS
     min_ticks_for_study: int = MIN_TICKS_FOR_STUDY
+    multiplicity_method: str = MULTIPLICITY_METHOD
+    primary_family_size: int = PRIMARY_FAMILY_SIZE
+    null_method: str = "shuffle_increments_recompute_pipeline"
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["acf_lags"] = list(self.acf_lags)
         d["future_response_horizons"] = list(self.future_response_horizons)
+        d["canonical_seed"] = DEFAULT_SEED
         return d
 
 
@@ -180,7 +198,7 @@ class TickSeries:
 
 
 def load_tick_series(
-    repo: TickRepository,
+    repo: Any,
     instrument: str,
     *,
     start_epoch: int | None = None,
@@ -552,6 +570,45 @@ def future_response_at_horizon(
     }
 
 
+def primary_extreme_statistic(
+    deltas: Sequence[float],
+    *,
+    window: int,
+    sigma: float,
+    horizon: int,
+    min_events: int,
+) -> dict[str, Any]:
+    """Primary Gate C statistic: mean direction-adjusted future return.
+
+    Recomputes causal event detection and response (full pipeline).
+    """
+    events = detect_extreme_events(deltas, window=window, sigma=sigma)
+    responses: list[float] = []
+    for t in events:
+        r = future_response_at_horizon(deltas, t, horizon)
+        if r is not None:
+            responses.append(float(r["direction_adjusted_future_return"]))
+    n_resp = len(responses)
+    if n_resp < min_events:
+        return {
+            "status": "INCONCLUSIVE",
+            "n_extreme_events": len(events),
+            "n_events_with_response": n_resp,
+            "observed_statistic": None,
+            "horizon_ticks": horizon,
+        }
+    mean_da = sum(responses) / n_resp
+    return {
+        "status": "OK",
+        "n_extreme_events": len(events),
+        "n_events_with_response": n_resp,
+        "observed_statistic": mean_da,
+        "horizon_ticks": horizon,
+        "continuation_rate": sum(1 for x in responses if x > 0) / n_resp,
+        "reversion_rate": sum(1 for x in responses if x < 0) / n_resp,
+    }
+
+
 def extreme_move_analysis(
     deltas: Sequence[float],
     *,
@@ -585,6 +642,7 @@ def extreme_move_analysis(
                 "continuation_rate": None,
                 "reversion_rate": None,
                 "mean_absolute_excursion": None,
+                "role": "primary_inferential" if h == PRIMARY_EXTREME_HORIZON else "descriptive",
             })
             continue
         da = [r["direction_adjusted_future_return"] for r in responses]
@@ -599,6 +657,7 @@ def extreme_move_analysis(
             "continuation_rate": cont / len(responses),
             "reversion_rate": rev / len(responses),
             "mean_absolute_excursion": sum(abs_ex) / len(abs_ex),
+            "role": "primary_inferential" if h == PRIMARY_EXTREME_HORIZON else "descriptive",
         })
 
     return {
@@ -618,20 +677,92 @@ def shuffle_increments(deltas: Sequence[float], rng: random.Random) -> list[floa
     return data
 
 
+def empirical_two_sided_pvalue(
+    observed: float | None,
+    null_values: Sequence[float | None],
+) -> float | None:
+    """Finite-sample two-sided empirical p-value.
+
+    Convention:
+      p = (#{|null| >= |observed|} + 1) / (n_null + 1)
+
+    "At least as extreme" means absolute value at least as large as |observed|
+    (two-sided against a null centered near zero).
+    """
+    if observed is None or not math.isfinite(observed):
+        return None
+    clean = [float(v) for v in null_values if v is not None and math.isfinite(float(v))]
+    if not clean:
+        return None
+    obs_abs = abs(float(observed))
+    count = sum(1 for v in clean if abs(v) >= obs_abs)
+    return (count + 1) / (len(clean) + 1)
+
+
+def holm_bonferroni(
+    p_values: Sequence[float | None],
+    *,
+    alpha: float,
+) -> list[dict[str, Any]]:
+    """Holm-Bonferroni step-down procedure.
+
+    None p-values are treated as 1.0 (non-rejecting) but still occupy a slot
+    in the primary-family denominator (m is len(p_values)).
+    """
+    m = len(p_values)
+    indexed: list[tuple[int, float]] = []
+    for i, p in enumerate(p_values):
+        pv = 1.0 if p is None or not math.isfinite(p) else float(p)
+        indexed.append((i, max(0.0, min(1.0, pv))))
+    order = sorted(range(m), key=lambda i: indexed[i][1])
+    results: list[dict[str, Any]] = [
+        {
+            "index": i,
+            "raw_p_value": None if p_values[i] is None else float(p_values[i]),  # type: ignore[arg-type]
+            "holm_adjusted_p_value": None,
+            "holm_threshold": None,
+            "reject": False,
+        }
+        for i in range(m)
+    ]
+    reject_remaining = True
+    for rank, idx in enumerate(order):
+        p = indexed[idx][1]
+        threshold = alpha / (m - rank)
+        # Adjusted p: max over preceding of (m-k+1)*p_(k)
+        adj = (m - rank) * p
+        if rank > 0:
+            prev_adj = results[order[rank - 1]]["holm_adjusted_p_value"]
+            if prev_adj is not None:
+                adj = max(adj, float(prev_adj))
+        adj = min(adj, 1.0)
+        results[idx]["holm_adjusted_p_value"] = adj
+        results[idx]["holm_threshold"] = threshold
+        if reject_remaining and p <= threshold:
+            results[idx]["reject"] = True
+        else:
+            reject_remaining = False
+            results[idx]["reject"] = False
+    return results
+
+
 def null_comparison(
     observed_stat: float | None,
     null_values: Sequence[float | None],
     *,
     significance_level: float,
 ) -> dict[str, Any]:
+    """Descriptive null summary + empirical p-value (no multiplicity)."""
     clean = [float(v) for v in null_values if v is not None and math.isfinite(float(v))]
+    p_emp = empirical_two_sided_pvalue(observed_stat, null_values)
     if observed_stat is None or not math.isfinite(observed_stat) or not clean:
         return {
             "observed_statistic": observed_stat,
             "null_mean": None, "null_std": None,
             "null_lower_quantile": None, "null_upper_quantile": None,
             "observed_minus_null": None,
-            "statistically_significant": False,
+            "empirical_p_value": p_emp,
+            "statistically_significant_unadjusted": False,
             "n_null": len(clean),
         }
     mu = sum(clean) / len(clean)
@@ -639,96 +770,88 @@ def null_comparison(
     alpha = significance_level
     lower = percentile(clean, 100.0 * (alpha / 2.0))
     upper = percentile(clean, 100.0 * (1.0 - alpha / 2.0))
-    sig = False
-    if lower is not None and upper is not None:
-        sig = observed_stat < lower or observed_stat > upper
+    unadj = bool(p_emp is not None and p_emp <= alpha)
     return {
         "observed_statistic": observed_stat,
         "null_mean": mu, "null_std": std,
         "null_lower_quantile": lower, "null_upper_quantile": upper,
         "observed_minus_null": observed_stat - mu,
-        "statistically_significant": sig,
+        "empirical_p_value": p_emp,
+        "statistically_significant_unadjusted": unadj,
         "n_null": len(clean),
     }
 
 
-def classify_acf_gate(
-    acf_rows: Sequence[dict[str, Any]],
-    null_by_lag: dict[int, dict[str, Any]],
+@dataclass
+class PrimaryTestResult:
+    test_id: str
+    family: str  # directional_acf | absolute_acf | squared_acf | extreme_response
+    lag: int | None
+    observed_statistic: float | None
+    effect_size: float | None
+    effect_size_floor: float
+    effect_size_above_floor: bool
+    raw_p_value: float | None
+    valid: bool
+    n: int
+    details: dict[str, Any] = field(default_factory=dict)
+
+    # Filled after Holm
+    holm_adjusted_p_value: float | None = None
+    holm_threshold: float | None = None
+    holm_reject: bool = False
+    classification: GateState = "INCONCLUSIVE"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "test_id": self.test_id,
+            "family": self.family,
+            "lag": self.lag,
+            "observed_statistic": self.observed_statistic,
+            "effect_size": self.effect_size,
+            "effect_size_floor": self.effect_size_floor,
+            "effect_size_above_floor": self.effect_size_above_floor,
+            "raw_p_value": self.raw_p_value,
+            "holm_adjusted_p_value": self.holm_adjusted_p_value,
+            "holm_threshold": self.holm_threshold,
+            "holm_reject": self.holm_reject,
+            "valid": self.valid,
+            "n": self.n,
+            "classification": self.classification,
+            "details": self.details,
+        }
+
+
+def apply_holm_and_classify(
+    tests: list[PrimaryTestResult],
     *,
-    config: StudyConfiguration,
-) -> tuple[GateState, list[dict[str, Any]]]:
-    details: list[dict[str, Any]] = []
-    any_valid = False
-    any_detected = False
-    for row in acf_rows:
-        lag = int(row["tick_lag"])
-        acf = row["acf"]
-        n = int(row["n"])
-        valid = n >= config.min_observations_for_acf and acf is not None
-        null = null_by_lag.get(lag, {})
-        stat_sig = bool(null.get("statistically_significant", False)) if valid else False
-        effect = abs(float(acf)) if acf is not None else 0.0
-        effect_ok = effect >= config.minimum_effect_size_acf
-        if not valid:
-            classification: GateState = "INCONCLUSIVE"
-        elif stat_sig and effect_ok:
-            classification = "DETECTED"
-            any_detected = True
-            any_valid = True
+    alpha: float,
+) -> list[PrimaryTestResult]:
+    """Apply Holm-Bonferroni across the full primary family; set classifications."""
+    pvals = [t.raw_p_value if t.valid else None for t in tests]
+    holm = holm_bonferroni(pvals, alpha=alpha)
+    for i, t in enumerate(tests):
+        h = holm[i]
+        t.holm_adjusted_p_value = h["holm_adjusted_p_value"]
+        t.holm_threshold = h["holm_threshold"]
+        t.holm_reject = bool(h["reject"])
+        if not t.valid:
+            t.classification = "INCONCLUSIVE"
+        elif t.holm_reject and t.effect_size_above_floor:
+            t.classification = "DETECTED"
         else:
-            classification = "NOT_DETECTED"
-            any_valid = True
-        details.append({
-            "tick_lag": lag, "acf": acf, "n": n,
-            "statistically_significant": stat_sig,
-            "effect_size": effect if acf is not None else None,
-            "effect_size_above_floor": effect_ok if acf is not None else False,
-            "minimum_effect_size": config.minimum_effect_size_acf,
-            "classification": classification,
-        })
-    if any_detected:
-        return "DETECTED", details
-    if not any_valid:
-        return "INCONCLUSIVE", details
-    return "NOT_DETECTED", details
+            t.classification = "NOT_DETECTED"
+    return tests
 
 
-def classify_transition_gate(
-    transitions: TransitionStats,
-    null_same_rate: dict[str, Any],
-    *,
-    config: StudyConfiguration,
-) -> tuple[GateState, dict[str, Any]]:
-    if transitions.n_pairs < config.min_transition_pairs:
-        return "INCONCLUSIVE", {
-            "n_pairs": transitions.n_pairs,
-            "same_direction_transition_rate": transitions.same_direction_transition_rate,
-            "statistically_significant": False,
-            "effect_size": None, "effect_size_above_floor": False,
-            "classification": "INCONCLUSIVE",
-        }
-    rate = transitions.same_direction_transition_rate
-    if rate is None:
-        return "INCONCLUSIVE", {
-            "n_pairs": transitions.n_pairs,
-            "same_direction_transition_rate": None,
-            "statistically_significant": False,
-            "effect_size": None, "effect_size_above_floor": False,
-            "classification": "INCONCLUSIVE",
-        }
-    effect = abs(rate - 0.5)
-    effect_ok = effect >= config.minimum_effect_size_transition
-    stat_sig = bool(null_same_rate.get("statistically_significant", False))
-    cls: GateState = "DETECTED" if (stat_sig and effect_ok) else "NOT_DETECTED"
-    return cls, {
-        "n_pairs": transitions.n_pairs,
-        "same_direction_transition_rate": rate,
-        "statistically_significant": stat_sig,
-        "effect_size": effect, "effect_size_above_floor": effect_ok,
-        "minimum_effect_size": config.minimum_effect_size_transition,
-        "classification": cls,
-    }
+def gate_from_tests(tests: Sequence[PrimaryTestResult]) -> GateState:
+    if not tests:
+        return "INCONCLUSIVE"
+    if any(t.classification == "DETECTED" for t in tests):
+        return "DETECTED"
+    if all(t.classification == "INCONCLUSIVE" for t in tests):
+        return "INCONCLUSIVE"
+    return "NOT_DETECTED"
 
 
 def synthesize_overall(
@@ -748,6 +871,30 @@ def synthesize_overall(
     return "NO_MEASURABLE_STRUCTURE"
 
 
+def resolve_pip_size_from_settings(
+    instrument: str,
+    settings: dict[str, Any] | None,
+) -> float | None:
+    """Resolve pip_size from authoritative project settings if present.
+
+    Does not invent values. Returns None when metadata is absent.
+    """
+    if not settings:
+        return None
+    instruments = settings.get("instruments") or {}
+    cfg = instruments.get(instrument) or {}
+    raw = cfg.get("pip_size")
+    if raw is None:
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(val):
+        return None
+    return val
+
+
 @dataclass
 class InstrumentCharacterization:
     instrument: str
@@ -760,6 +907,7 @@ class InstrumentCharacterization:
     runs: dict[str, RunStats]
     extreme_moves: dict[str, Any]
     null_comparison: dict[str, Any]
+    primary_tests: list[PrimaryTestResult]
     gate_a: GateState
     gate_a_details: list[dict[str, Any]]
     gate_b: GateState
@@ -769,6 +917,7 @@ class InstrumentCharacterization:
     overall: OverallState
     pip_size: float | None
     notes: list[str] = field(default_factory=list)
+    transitions_role: str = "descriptive_supporting_characterization"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -779,14 +928,18 @@ class InstrumentCharacterization:
             "acf_absolute": self.acf_absolute,
             "acf_squared": self.acf_squared,
             "transitions": self.transitions.to_dict(),
+            "transitions_role": self.transitions_role,
             "runs": {k: v.to_dict() for k, v in self.runs.items()},
             "extreme_moves": self.extreme_moves,
             "null_comparison": self.null_comparison,
+            "primary_tests": [t.to_dict() for t in self.primary_tests],
+            "primary_family_size": len(self.primary_tests),
+            "multiplicity_method": MULTIPLICITY_METHOD,
             "gate_a_directional_dependence": self.gate_a,
             "gate_a_details": self.gate_a_details,
             "gate_b_volatility_dependence": self.gate_b,
             "gate_b_details": self.gate_b_details,
-            "gate_c_transition_structure": self.gate_c,
+            "gate_c_extreme_move_response": self.gate_c,
             "gate_c_details": self.gate_c_details,
             "overall": self.overall,
             "pip_size": self.pip_size,
@@ -817,6 +970,7 @@ def characterize_instrument(
             runs=run_length_statistics([]),
             extreme_moves={"status": "INCONCLUSIVE", "n_extreme_events": 0},
             null_comparison={},
+            primary_tests=[],
             gate_a="INCONCLUSIVE", gate_a_details=[],
             gate_b="INCONCLUSIVE", gate_b_details={},
             gate_c="INCONCLUSIVE", gate_c_details={},
@@ -826,6 +980,9 @@ def characterize_instrument(
     deltas = compute_increments(series.prices)
     dist = increment_distribution(deltas)
     mean_interval = coverage.inter_tick.get("mean")
+    mean_abs_inc = (
+        sum(abs(d) for d in deltas) / len(deltas) if deltas else None
+    )
 
     acf_dir = acf_table(deltas, config.acf_lags, mean_interval_seconds=mean_interval)
     abs_deltas = [abs(d) for d in deltas]
@@ -842,12 +999,19 @@ def characterize_instrument(
         horizons=config.future_response_horizons,
         min_events=config.min_extreme_events,
     )
+    primary_ext = primary_extreme_statistic(
+        deltas,
+        window=config.extreme_move_window,
+        sigma=config.extreme_move_threshold_sigma,
+        horizon=config.primary_extreme_horizon,
+        min_events=config.min_extreme_events,
+    )
 
     rng = random.Random(config.seed)
     null_acf_dir: dict[int, list[float | None]] = {lag: [] for lag in config.acf_lags}
     null_acf_abs: dict[int, list[float | None]] = {lag: [] for lag in config.acf_lags}
     null_acf_sq: dict[int, list[float | None]] = {lag: [] for lag in config.acf_lags}
-    null_same_rates: list[float | None] = []
+    null_extreme: list[float | None] = []
 
     for _ in range(config.null_simulations):
         shuffled = shuffle_increments(deltas, rng)
@@ -858,55 +1022,118 @@ def characterize_instrument(
             null_acf_abs[lag].append(aa)
             asq, _ = acf_at_lag([x * x for x in shuffled], lag)
             null_acf_sq[lag].append(asq)
-        tr = transition_statistics(shuffled)
-        null_same_rates.append(tr.same_direction_transition_rate)
+        # Full pipeline recomputation for extreme null
+        pe = primary_extreme_statistic(
+            shuffled,
+            window=config.extreme_move_window,
+            sigma=config.extreme_move_threshold_sigma,
+            horizon=config.primary_extreme_horizon,
+            min_events=config.min_extreme_events,
+        )
+        null_extreme.append(pe.get("observed_statistic"))
 
-    null_dir_by_lag = {
-        lag: null_comparison(
-            next((r["acf"] for r in acf_dir if r["tick_lag"] == lag), None),
-            null_acf_dir[lag],
-            significance_level=config.significance_level,
-        )
-        for lag in config.acf_lags
-    }
-    null_abs_by_lag = {
-        lag: null_comparison(
-            next((r["acf"] for r in acf_abs if r["tick_lag"] == lag), None),
-            null_acf_abs[lag],
-            significance_level=config.significance_level,
-        )
-        for lag in config.acf_lags
-    }
-    null_sq_by_lag = {
-        lag: null_comparison(
-            next((r["acf"] for r in acf_sq if r["tick_lag"] == lag), None),
-            null_acf_sq[lag],
-            significance_level=config.significance_level,
-        )
-        for lag in config.acf_lags
-    }
-    null_trans = null_comparison(
-        transitions.same_direction_transition_rate,
-        null_same_rates,
-        significance_level=config.significance_level,
+    primary_tests: list[PrimaryTestResult] = []
+
+    def _acf_tests(
+        rows: list[dict[str, Any]],
+        null_by_lag: dict[int, list[float | None]],
+        family: str,
+    ) -> None:
+        for row in rows:
+            lag = int(row["tick_lag"])
+            acf = row["acf"]
+            n = int(row["n"])
+            valid = n >= config.min_observations_for_acf and acf is not None
+            p_raw = empirical_two_sided_pvalue(acf, null_by_lag[lag]) if valid else None
+            effect = abs(float(acf)) if acf is not None else None
+            effect_ok = (
+                effect is not None and effect >= config.minimum_effect_size_acf
+            )
+            primary_tests.append(PrimaryTestResult(
+                test_id=f"{family}_lag_{lag}",
+                family=family,
+                lag=lag,
+                observed_statistic=acf,
+                effect_size=effect,
+                effect_size_floor=config.minimum_effect_size_acf,
+                effect_size_above_floor=bool(effect_ok),
+                raw_p_value=p_raw,
+                valid=valid,
+                n=n,
+            ))
+
+    _acf_tests(acf_dir, null_acf_dir, "directional_acf")
+    _acf_tests(acf_abs, null_acf_abs, "absolute_acf")
+    _acf_tests(acf_sq, null_acf_sq, "squared_acf")
+
+    # Gate C primary extreme test
+    ext_obs = primary_ext.get("observed_statistic")
+    ext_valid = primary_ext.get("status") == "OK" and ext_obs is not None
+    ext_p = empirical_two_sided_pvalue(ext_obs, null_extreme) if ext_valid else None
+    if mean_abs_inc and mean_abs_inc > 0 and ext_obs is not None:
+        ext_effect = abs(float(ext_obs)) / mean_abs_inc
+    else:
+        ext_effect = None
+    ext_effect_ok = (
+        ext_effect is not None and ext_effect >= config.minimum_effect_size_extreme
+    )
+    primary_tests.append(PrimaryTestResult(
+        test_id=f"extreme_response_h{config.primary_extreme_horizon}",
+        family="extreme_response",
+        lag=None,
+        observed_statistic=ext_obs if isinstance(ext_obs, float) else None,
+        effect_size=ext_effect,
+        effect_size_floor=config.minimum_effect_size_extreme,
+        effect_size_above_floor=bool(ext_effect_ok),
+        raw_p_value=ext_p,
+        valid=bool(ext_valid),
+        n=int(primary_ext.get("n_events_with_response") or 0),
+        details={
+            "horizon_ticks": config.primary_extreme_horizon,
+            "n_extreme_events": primary_ext.get("n_extreme_events"),
+            "status": primary_ext.get("status"),
+            "effect_size_definition": (
+                "abs(mean_direction_adjusted_future_return) / mean(abs(increment))"
+            ),
+        },
+    ))
+
+    assert len(primary_tests) == config.primary_family_size, (
+        f"primary family size mismatch: {len(primary_tests)} != {config.primary_family_size}"
     )
 
-    gate_a, gate_a_details = classify_acf_gate(acf_dir, null_dir_by_lag, config=config)
-    gate_b_abs, details_abs = classify_acf_gate(acf_abs, null_abs_by_lag, config=config)
-    gate_b_sq, details_sq = classify_acf_gate(acf_sq, null_sq_by_lag, config=config)
+    apply_holm_and_classify(primary_tests, alpha=config.significance_level)
+
+    dir_tests = [t for t in primary_tests if t.family == "directional_acf"]
+    abs_tests = [t for t in primary_tests if t.family == "absolute_acf"]
+    sq_tests = [t for t in primary_tests if t.family == "squared_acf"]
+    ext_tests = [t for t in primary_tests if t.family == "extreme_response"]
+
+    gate_a = gate_from_tests(dir_tests)
+    gate_b_abs = gate_from_tests(abs_tests)
+    gate_b_sq = gate_from_tests(sq_tests)
     if gate_b_abs == "DETECTED" or gate_b_sq == "DETECTED":
         gate_b: GateState = "DETECTED"
     elif gate_b_abs == "INCONCLUSIVE" and gate_b_sq == "INCONCLUSIVE":
         gate_b = "INCONCLUSIVE"
     else:
         gate_b = "NOT_DETECTED"
-    gate_b_details: dict[str, Any] = {
-        "absolute_return": details_abs,
-        "squared_return": details_sq,
+    gate_c = gate_from_tests(ext_tests)
+
+    gate_a_details = [t.to_dict() for t in dir_tests]
+    gate_b_details = {
+        "absolute_return": [t.to_dict() for t in abs_tests],
+        "squared_return": [t.to_dict() for t in sq_tests],
     }
-    gate_c, gate_c_details = classify_transition_gate(
-        transitions, null_trans, config=config
-    )
+    gate_c_details = {
+        "primary_test": ext_tests[0].to_dict() if ext_tests else {},
+        "descriptive_horizons": extreme,
+        "null_method": (
+            "shuffle increments; recompute causal event detection and response "
+            "on each null realization"
+        ),
+    }
+
     overall = synthesize_overall(gate_a, gate_b, gate_c, study_valid=True)
 
     notes.append(
@@ -915,12 +1142,19 @@ def characterize_instrument(
     )
     notes.append(
         "Null model preserves the marginal increment distribution while destroying "
-        "temporal order (shuffle). This is a temporal-order null, not proof that "
-        "the true generator is IID."
+        "temporal order (shuffle). Extreme-move nulls recompute the full causal "
+        "event-detection + response pipeline. This is a temporal-order null, not "
+        "proof that the true generator is IID."
     )
     notes.append(
-        "Detection requires BOTH statistical significance under the preregistered "
-        "null AND the frozen minimum-effect-size floor."
+        f"Primary inferential family size m={config.primary_family_size}; "
+        f"multiple-testing method={config.multiplicity_method}. "
+        "Detection requires BOTH Holm-adjusted significance AND the frozen "
+        "minimum-effect-size floor."
+    )
+    notes.append(
+        "Transition probabilities and run statistics are descriptive/supporting "
+        "characterization only and do not determine Gate D."
     )
     if pip_size is not None:
         notes.append(
@@ -934,19 +1168,31 @@ def characterize_instrument(
             "cannot be fully quantified."
         )
 
+    null_dir_by_lag = {
+        lag: null_comparison(
+            next((r["acf"] for r in acf_dir if r["tick_lag"] == lag), None),
+            null_acf_dir[lag],
+            significance_level=config.significance_level,
+        )
+        for lag in config.acf_lags
+    }
+
     return InstrumentCharacterization(
         instrument=instrument, coverage=coverage, increment_distribution=dist,
         acf_directional=acf_dir, acf_absolute=acf_abs, acf_squared=acf_sq,
         transitions=transitions, runs=runs, extreme_moves=extreme,
         null_comparison={
             "directional_acf": {str(k): v for k, v in null_dir_by_lag.items()},
-            "absolute_acf": {str(k): v for k, v in null_abs_by_lag.items()},
-            "squared_acf": {str(k): v for k, v in null_sq_by_lag.items()},
-            "same_direction_transition_rate": null_trans,
+            "extreme_response_primary": null_comparison(
+                ext_obs if isinstance(ext_obs, float) else None,
+                null_extreme,
+                significance_level=config.significance_level,
+            ),
             "null_simulations": config.null_simulations,
             "seed": config.seed,
-            "method": "shuffle_increments",
+            "method": config.null_method,
         },
+        primary_tests=primary_tests,
         gate_a=gate_a, gate_a_details=gate_a_details,
         gate_b=gate_b, gate_b_details=gate_b_details,
         gate_c=gate_c, gate_c_details=gate_c_details,
@@ -960,13 +1206,30 @@ class StatisticalCharacterizationReport:
     instruments: list[InstrumentCharacterization]
     overall_synthesis: OverallState
     software_study_version: str = STUDY_VERSION
+    canonical: bool = True
+    actual_seed: int = DEFAULT_SEED
+    canonical_seed: int = DEFAULT_SEED
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "study_id": self.configuration.study_id,
             "study_version": self.configuration.study_version,
             "software_study_version": self.software_study_version,
+            "canonical": self.canonical,
+            "canonical_seed": self.canonical_seed,
+            "actual_seed": self.actual_seed,
             "configuration": self.configuration.to_dict(),
+            "multiplicity": {
+                "method": self.configuration.multiplicity_method,
+                "primary_family_size": self.configuration.primary_family_size,
+                "significance_level": self.configuration.significance_level,
+                "families": [
+                    "directional_acf (9 lags)",
+                    "absolute_acf (9 lags)",
+                    "squared_acf (9 lags)",
+                    "extreme_response (1 primary horizon)",
+                ],
+            },
             "instruments": [i.to_dict() for i in self.instruments],
             "overall_synthesis": self.overall_synthesis,
             "interpretation_rules": {
@@ -1003,10 +1266,20 @@ def run_statistical_characterization(
     end_epoch: int | None = None,
     config: StudyConfiguration = FROZEN_STUDY_CONFIG,
     pip_sizes: dict[str, float | None] | None = None,
+    settings: dict[str, Any] | None = None,
+    actual_seed: int | None = None,
 ) -> StatisticalCharacterizationReport:
+    from smb.data.repository import TickRepository
+    from smb.data.store import ParquetTickStore
+
     store = ParquetTickStore(Path(data_root))
     repo = TickRepository(store)
-    pip_sizes = pip_sizes or {}
+    pip_sizes = dict(pip_sizes or {})
+    for inst in instruments:
+        if inst not in pip_sizes:
+            pip_sizes[inst] = resolve_pip_size_from_settings(inst, settings)
+    seed_used = int(actual_seed) if actual_seed is not None else int(config.seed)
+    canonical = seed_used == DEFAULT_SEED and config.seed == DEFAULT_SEED
     results: list[InstrumentCharacterization] = []
     for inst in instruments:
         series = load_tick_series(
@@ -1019,7 +1292,12 @@ def run_statistical_characterization(
         )
     overall = _combine_overall([r.overall for r in results])
     return StatisticalCharacterizationReport(
-        configuration=config, instruments=results, overall_synthesis=overall,
+        configuration=config,
+        instruments=results,
+        overall_synthesis=overall,
+        canonical=canonical,
+        actual_seed=seed_used,
+        canonical_seed=DEFAULT_SEED,
     )
 
 
@@ -1037,6 +1315,12 @@ def format_markdown_report(report: StatisticalCharacterizationReport) -> str:
     lines.append("")
     lines.append("## 2. Frozen configuration")
     lines.append("")
+    lines.append(f"- **canonical run:** `{report.canonical}`")
+    lines.append(f"- **canonical_seed:** `{report.canonical_seed}`")
+    lines.append(f"- **actual_seed:** `{report.actual_seed}`")
+    lines.append(f"- **multiplicity:** `{cfg.multiplicity_method}` (m={cfg.primary_family_size})")
+    lines.append(f"- **primary extreme horizon:** `{cfg.primary_extreme_horizon}` ticks")
+    lines.append("")
     lines.append("```json")
     lines.append(json.dumps(cfg.to_dict(), indent=2, sort_keys=True))
     lines.append("```")
@@ -1047,7 +1331,7 @@ def format_markdown_report(report: StatisticalCharacterizationReport) -> str:
     for inst in report.instruments:
         lines.append(f"## Instrument: `{inst.instrument}`")
         lines.append("")
-        lines.append("### 3. Dataset coverage")
+        lines.append("### Dataset coverage")
         lines.append("")
         cov = inst.coverage
         lines.append(f"- tick_count: {cov.tick_count}")
@@ -1055,14 +1339,15 @@ def format_markdown_report(report: StatisticalCharacterizationReport) -> str:
         lines.append(f"- latest_epoch: {cov.latest_epoch}")
         lines.append(f"- calendar_span_seconds: {cov.calendar_span_seconds}")
         lines.append(f"- calendar_span_days: {cov.calendar_span_days}")
+        lines.append(f"- pip_size: {inst.pip_size}")
         lines.append("")
-        lines.append("### 4. Tick interval characteristics")
+        lines.append("### Tick interval characteristics")
         lines.append("")
         lines.append("```json")
         lines.append(json.dumps(cov.inter_tick, indent=2, sort_keys=True))
         lines.append("```")
         lines.append("")
-        lines.append("### 5. Return distribution")
+        lines.append("### Return distribution")
         lines.append("")
         lines.append("```json")
         lines.append(
@@ -1076,64 +1361,51 @@ def format_markdown_report(report: StatisticalCharacterizationReport) -> str:
             "Percentiles: Hyndman-Fan type 7."
         )
         lines.append("")
-        lines.append("### 6. Directional dependence (Gate A)")
+        lines.append("### Gate A — directional dependence")
         lines.append("")
         lines.append(f"**Gate A:** `{inst.gate_a}`")
         lines.append("")
-        lines.append("```json")
-        lines.append(json.dumps(inst.gate_a_details, indent=2, sort_keys=True))
-        lines.append("```")
-        lines.append("")
-        lines.append("### 7. Volatility dependence (Gate B)")
+        lines.append("### Gate B — volatility dependence")
         lines.append("")
         lines.append(f"**Gate B:** `{inst.gate_b}`")
         lines.append("")
-        lines.append("```json")
-        lines.append(json.dumps(inst.gate_b_details, indent=2, sort_keys=True))
-        lines.append("```")
-        lines.append("")
-        lines.append("### 8. Transition / run analysis (Gate C)")
+        lines.append("### Gate C — extreme-move response")
         lines.append("")
         lines.append(f"**Gate C:** `{inst.gate_c}`")
+        lines.append("")
+        lines.append("```json")
+        lines.append(json.dumps(inst.gate_c_details, indent=2, sort_keys=True))
+        lines.append("```")
+        lines.append("")
+        lines.append("### Transition / run analysis (descriptive only)")
+        lines.append("")
+        lines.append(f"- role: `{inst.transitions_role}`")
         lines.append("")
         lines.append("```json")
         lines.append(json.dumps(inst.transitions.to_dict(), indent=2, sort_keys=True))
         lines.append("```")
         lines.append("")
+        lines.append("### Primary inferential tests (Holm-Bonferroni)")
+        lines.append("")
         lines.append("```json")
         lines.append(
-            json.dumps(
-                {k: v.to_dict() for k, v in inst.runs.items()}, indent=2, sort_keys=True
-            )
+            json.dumps([t.to_dict() for t in inst.primary_tests], indent=2, sort_keys=True)
         )
         lines.append("```")
         lines.append("")
-        lines.append("### 9. Extreme-move analysis")
-        lines.append("")
-        lines.append("```json")
-        lines.append(json.dumps(inst.extreme_moves, indent=2, sort_keys=True))
-        lines.append("```")
-        lines.append("")
-        lines.append("### 10. Randomized null comparison")
-        lines.append("")
-        lines.append(
-            "Null preserves marginal increment distribution; destroys temporal order "
-            "(deterministic shuffle)."
-        )
-        lines.append("")
-        lines.append("### 11–14. Gate summary")
+        lines.append("### Gate summary")
         lines.append("")
         lines.append(f"- Gate A (directional): `{inst.gate_a}`")
         lines.append(f"- Gate B (volatility): `{inst.gate_b}`")
-        lines.append(f"- Gate C (transitions): `{inst.gate_c}`")
+        lines.append(f"- Gate C (extreme-move): `{inst.gate_c}`")
         lines.append(f"- Overall: `{inst.overall}`")
         lines.append("")
-        lines.append("### 15. Limitations")
+        lines.append("### Limitations")
         lines.append("")
         for n in inst.notes:
             lines.append(f"- {n}")
         lines.append("")
-        lines.append("### 16. Explicit non-strategy statement")
+        lines.append("### Explicit non-strategy statement")
         lines.append("")
         lines.append(
             "This characterization is **not** a trading strategy. Detected structure "
