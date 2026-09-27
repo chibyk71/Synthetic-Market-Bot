@@ -17,6 +17,7 @@ from smb.research.statistical_characterization import (
     PrimaryTestResult,
     StudyConfiguration,
     TickSeries,
+    _combine_overall,
     _excess_kurtosis_bias_corrected,
     _skewness_bias_corrected,
     acf_at_lag,
@@ -36,7 +37,6 @@ from smb.research.statistical_characterization import (
     run_length_statistics,
     shuffle_increments,
     synthesize_overall,
-    _combine_overall,
     transition_statistics,
     write_artifacts,
 )
