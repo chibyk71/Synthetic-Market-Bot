@@ -44,7 +44,7 @@ from smb.research.stats import percentile
 # ---------------------------------------------------------------------------
 
 STUDY_ID = "milestone-6d-statistical-characterization"
-STUDY_VERSION = "6d.2"
+STUDY_VERSION = "6d.3"
 DEFAULT_SEED = 20260927
 ACF_LAGS: tuple[int, ...] = (1, 2, 5, 10, 30, 60, 120, 300, 600)
 EXTREME_MOVE_WINDOW = 300
@@ -53,6 +53,9 @@ FUTURE_RESPONSE_HORIZONS: tuple[int, ...] = (1, 5, 10, 30, 60, 180, 300)
 # Primary Gate C horizon (single inferential horizon; others descriptive)
 PRIMARY_EXTREME_HORIZON = 30
 NULL_SIMULATIONS = 100
+# Minimum finite null statistics required before a primary test may enter inference.
+# Matches requested null count: do not silently shrink the null denominator.
+MIN_VALID_NULL_SIMULATIONS = NULL_SIMULATIONS
 SIGNIFICANCE_LEVEL = 0.05
 MINIMUM_EFFECT_SIZE_ACF = 0.02
 MINIMUM_EFFECT_SIZE_TRANSITION = 0.03  # descriptive comparisons only
@@ -95,6 +98,7 @@ class StudyConfiguration:
     future_response_horizons: tuple[int, ...] = FUTURE_RESPONSE_HORIZONS
     primary_extreme_horizon: int = PRIMARY_EXTREME_HORIZON
     null_simulations: int = NULL_SIMULATIONS
+    min_valid_null_simulations: int = MIN_VALID_NULL_SIMULATIONS
     significance_level: float = SIGNIFICANCE_LEVEL
     minimum_effect_size_acf: float = MINIMUM_EFFECT_SIZE_ACF
     minimum_effect_size_transition: float = MINIMUM_EFFECT_SIZE_TRANSITION
@@ -845,12 +849,18 @@ def apply_holm_and_classify(
 
 
 def gate_from_tests(tests: Sequence[PrimaryTestResult]) -> GateState:
+    """Conservative gate aggregation.
+
+    Any INCONCLUSIVE primary component makes the gate INCONCLUSIVE so that
+    insufficient-data evidence cannot be hidden by sibling NOT_DETECTED /
+    DETECTED outcomes. Gate D then maps INCONCLUSIVE → NEEDS_MORE_DATA.
+    """
     if not tests:
+        return "INCONCLUSIVE"
+    if any(t.classification == "INCONCLUSIVE" for t in tests):
         return "INCONCLUSIVE"
     if any(t.classification == "DETECTED" for t in tests):
         return "DETECTED"
-    if all(t.classification == "INCONCLUSIVE" for t in tests):
-        return "INCONCLUSIVE"
     return "NOT_DETECTED"
 
 
@@ -1034,6 +1044,13 @@ def characterize_instrument(
 
     primary_tests: list[PrimaryTestResult] = []
 
+    def _count_valid_nulls(null_vals: Sequence[float | None]) -> int:
+        return sum(
+            1
+            for v in null_vals
+            if v is not None and isinstance(v, (int, float)) and math.isfinite(float(v))
+        )
+
     def _acf_tests(
         rows: list[dict[str, Any]],
         null_by_lag: dict[int, list[float | None]],
@@ -1043,7 +1060,10 @@ def characterize_instrument(
             lag = int(row["tick_lag"])
             acf = row["acf"]
             n = int(row["n"])
-            valid = n >= config.min_observations_for_acf and acf is not None
+            n_valid_null = _count_valid_nulls(null_by_lag[lag])
+            data_ok = n >= config.min_observations_for_acf and acf is not None
+            null_ok = n_valid_null >= config.min_valid_null_simulations
+            valid = data_ok and null_ok
             p_raw = empirical_two_sided_pvalue(acf, null_by_lag[lag]) if valid else None
             effect = abs(float(acf)) if acf is not None else None
             effect_ok = (
@@ -1060,6 +1080,11 @@ def characterize_instrument(
                 raw_p_value=p_raw,
                 valid=valid,
                 n=n,
+                details={
+                    "null_simulations_requested": config.null_simulations,
+                    "null_simulations_valid": n_valid_null,
+                    "minimum_valid_null_simulations": config.min_valid_null_simulations,
+                },
             ))
 
     _acf_tests(acf_dir, null_acf_dir, "directional_acf")
@@ -1068,7 +1093,10 @@ def characterize_instrument(
 
     # Gate C primary extreme test
     ext_obs = primary_ext.get("observed_statistic")
-    ext_valid = primary_ext.get("status") == "OK" and ext_obs is not None
+    n_valid_null_ext = _count_valid_nulls(null_extreme)
+    null_ok_ext = n_valid_null_ext >= config.min_valid_null_simulations
+    obs_ok_ext = primary_ext.get("status") == "OK" and ext_obs is not None
+    ext_valid = bool(obs_ok_ext and null_ok_ext)
     ext_p = empirical_two_sided_pvalue(ext_obs, null_extreme) if ext_valid else None
     if mean_abs_inc and mean_abs_inc > 0 and ext_obs is not None:
         ext_effect = abs(float(ext_obs)) / mean_abs_inc
@@ -1092,6 +1120,9 @@ def characterize_instrument(
             "horizon_ticks": config.primary_extreme_horizon,
             "n_extreme_events": primary_ext.get("n_extreme_events"),
             "status": primary_ext.get("status"),
+            "null_simulations_requested": config.null_simulations,
+            "null_simulations_valid": n_valid_null_ext,
+            "minimum_valid_null_simulations": config.min_valid_null_simulations,
             "effect_size_definition": (
                 "abs(mean_direction_adjusted_future_return) / mean(abs(increment))"
             ),
@@ -1112,10 +1143,11 @@ def characterize_instrument(
     gate_a = gate_from_tests(dir_tests)
     gate_b_abs = gate_from_tests(abs_tests)
     gate_b_sq = gate_from_tests(sq_tests)
-    if gate_b_abs == "DETECTED" or gate_b_sq == "DETECTED":
-        gate_b: GateState = "DETECTED"
-    elif gate_b_abs == "INCONCLUSIVE" and gate_b_sq == "INCONCLUSIVE":
-        gate_b = "INCONCLUSIVE"
+    # Conservative across absolute and squared families (same rule as gate_from_tests).
+    if gate_b_abs == "INCONCLUSIVE" or gate_b_sq == "INCONCLUSIVE":
+        gate_b: GateState = "INCONCLUSIVE"
+    elif gate_b_abs == "DETECTED" or gate_b_sq == "DETECTED":
+        gate_b = "DETECTED"
     else:
         gate_b = "NOT_DETECTED"
     gate_c = gate_from_tests(ext_tests)
@@ -1278,8 +1310,13 @@ def run_statistical_characterization(
     for inst in instruments:
         if inst not in pip_sizes:
             pip_sizes[inst] = resolve_pip_size_from_settings(inst, settings)
+    from dataclasses import replace as _dc_replace
+
     seed_used = int(actual_seed) if actual_seed is not None else int(config.seed)
-    canonical = seed_used == DEFAULT_SEED and config.seed == DEFAULT_SEED
+    # Keep serialized actual_seed consistent with the seed used by null generation.
+    if seed_used != config.seed:
+        config = _dc_replace(config, seed=seed_used)
+    canonical = seed_used == DEFAULT_SEED
     results: list[InstrumentCharacterization] = []
     for inst in instruments:
         series = load_tick_series(

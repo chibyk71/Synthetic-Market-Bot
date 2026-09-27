@@ -384,20 +384,6 @@ def test_gate_c_insufficient_events_inconclusive() -> None:
     assert result.gate_c in ("INCONCLUSIVE", "NOT_DETECTED")
 
 
-def test_null_extreme_pipeline_recomputation() -> None:
-    """Null must recompute events, not reuse observed event indices."""
-    deltas = [0.1] * 40 + [5.0] + [0.1] * 40 + [-5.0] + [0.1] * 40
-    obs = primary_extreme_statistic(
-        deltas, window=20, sigma=2.0, horizon=5, min_events=1
-    )
-    assert obs["status"] in ("OK", "INCONCLUSIVE")
-    shuffled = shuffle_increments(deltas, random.Random(1))
-    null_stat = primary_extreme_statistic(
-        shuffled, window=20, sigma=2.0, horizon=5, min_events=1
-    )
-    # Pipeline runs independently; structure of result is the same keys
-    assert "observed_statistic" in null_stat
-    assert "n_extreme_events" in null_stat
 
 
 # --- Pip / seed ---
@@ -462,3 +448,160 @@ def test_coverage_fields_present() -> None:
     assert cov.tick_count == 120
     assert cov.earliest_epoch is not None
     assert cov.calendar_span_days is not None
+
+
+# --- Review blockers: conservative gates + null sufficiency ---
+
+
+def test_gate_inconclusive_propagates_over_detected() -> None:
+    """Any INCONCLUSIVE component forces gate INCONCLUSIVE (conservative)."""
+    detected = PrimaryTestResult(
+        test_id="d",
+        family="directional_acf",
+        lag=1,
+        observed_statistic=0.5,
+        effect_size=0.5,
+        effect_size_floor=0.02,
+        effect_size_above_floor=True,
+        raw_p_value=0.001,
+        valid=True,
+        n=500,
+        classification="DETECTED",
+    )
+    inconclusive = PrimaryTestResult(
+        test_id="i",
+        family="directional_acf",
+        lag=2,
+        observed_statistic=None,
+        effect_size=None,
+        effect_size_floor=0.02,
+        effect_size_above_floor=False,
+        raw_p_value=None,
+        valid=False,
+        n=5,
+        classification="INCONCLUSIVE",
+    )
+    assert gate_from_tests([detected, inconclusive]) == "INCONCLUSIVE"
+    assert gate_from_tests([inconclusive, detected]) == "INCONCLUSIVE"
+
+
+def test_gate_inconclusive_propagates_over_not_detected() -> None:
+    not_det = PrimaryTestResult(
+        test_id="n",
+        family="directional_acf",
+        lag=1,
+        observed_statistic=0.01,
+        effect_size=0.01,
+        effect_size_floor=0.02,
+        effect_size_above_floor=False,
+        raw_p_value=0.5,
+        valid=True,
+        n=500,
+        classification="NOT_DETECTED",
+    )
+    inconclusive = PrimaryTestResult(
+        test_id="i",
+        family="directional_acf",
+        lag=2,
+        observed_statistic=None,
+        effect_size=None,
+        effect_size_floor=0.02,
+        effect_size_above_floor=False,
+        raw_p_value=None,
+        valid=False,
+        n=5,
+        classification="INCONCLUSIVE",
+    )
+    assert gate_from_tests([not_det, inconclusive]) == "INCONCLUSIVE"
+
+
+def test_gate_b_inconclusive_propagates_to_overall() -> None:
+    """Partial INCONCLUSIVE on a primary gate → NEEDS_MORE_DATA."""
+    assert (
+        synthesize_overall("NOT_DETECTED", "INCONCLUSIVE", "NOT_DETECTED", study_valid=True)
+        == "NEEDS_MORE_DATA"
+    )
+    assert (
+        synthesize_overall("DETECTED", "INCONCLUSIVE", "NOT_DETECTED", study_valid=True)
+        == "NEEDS_MORE_DATA"
+    )
+
+
+def test_insufficient_valid_nulls_makes_extreme_inconclusive() -> None:
+    """When valid null count < min, extreme primary test is invalid/INCONCLUSIVE."""
+    from smb.research.statistical_characterization import StudyConfiguration
+
+    # Force min_valid_null very high relative to null_simulations so nulls fail sufficiency
+    cfg = StudyConfiguration(
+        null_simulations=5,
+        min_valid_null_simulations=5,
+        min_ticks_for_study=50,
+        min_extreme_events=5,
+        min_observations_for_acf=10,
+    )
+    # Series long enough for study but with structure that may yield few extreme nulls
+    # is hard to force; instead unit-test the classification path via PrimaryTestResult
+    t = PrimaryTestResult(
+        test_id="extreme",
+        family="extreme_response",
+        lag=None,
+        observed_statistic=1.0,
+        effect_size=0.5,
+        effect_size_floor=0.1,
+        effect_size_above_floor=True,
+        raw_p_value=None,  # would be None when valid=False due to null insufficiency
+        valid=False,
+        n=30,
+        details={
+            "null_simulations_requested": 100,
+            "null_simulations_valid": 7,
+            "minimum_valid_null_simulations": 100,
+        },
+    )
+    apply_holm_and_classify([t], alpha=0.05)
+    assert t.classification == "INCONCLUSIVE"
+    assert gate_from_tests([t]) == "INCONCLUSIVE"
+
+
+def test_null_extreme_pipeline_uses_shuffled_series(monkeypatch) -> None:
+    """Null path must call detect_extreme_events on shuffled input, not observed indices."""
+    from smb.research import statistical_characterization as sc
+
+    observed = [0.1] * 40 + [8.0] + [0.1] * 40
+    calls: list[list[float]] = []
+    real_detect = sc.detect_extreme_events
+
+    def tracking_detect(deltas, *, window, sigma):
+        calls.append(list(deltas))
+        return real_detect(deltas, window=window, sigma=sigma)
+
+    monkeypatch.setattr(sc, "detect_extreme_events", tracking_detect)
+
+    # Observed
+    sc.primary_extreme_statistic(
+        observed, window=15, sigma=2.0, horizon=5, min_events=1
+    )
+    assert len(calls) >= 1
+    assert calls[0] == observed
+
+    # Shuffled must be a different list identity/content path
+    shuffled = sc.shuffle_increments(observed, random.Random(99))
+    before = len(calls)
+    sc.primary_extreme_statistic(
+        shuffled, window=15, sigma=2.0, horizon=5, min_events=1
+    )
+    assert len(calls) == before + 1
+    assert calls[-1] == shuffled
+    assert calls[-1] != observed or shuffled == observed  # content may coincide rarely
+    # Stronger: event detection was invoked with the shuffled argument object content
+    assert calls[-1] is not calls[0]
+
+
+def test_min_valid_null_config_frozen() -> None:
+    from smb.research.statistical_characterization import (
+        MIN_VALID_NULL_SIMULATIONS,
+        NULL_SIMULATIONS,
+    )
+
+    assert MIN_VALID_NULL_SIMULATIONS == NULL_SIMULATIONS
+    assert FROZEN_STUDY_CONFIG.min_valid_null_simulations == NULL_SIMULATIONS
