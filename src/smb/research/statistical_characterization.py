@@ -44,7 +44,7 @@ from smb.research.stats import percentile
 # ---------------------------------------------------------------------------
 
 STUDY_ID = "milestone-6d-statistical-characterization"
-STUDY_VERSION = "6d.3"
+STUDY_VERSION = "6d.4"
 DEFAULT_SEED = 20260927
 ACF_LAGS: tuple[int, ...] = (1, 2, 5, 10, 30, 60, 120, 300, 600)
 EXTREME_MOVE_WINDOW = 300
@@ -1279,14 +1279,20 @@ class StatisticalCharacterizationReport:
 
 
 def _combine_overall(states: Sequence[OverallState]) -> OverallState:
+    """Conservative multi-instrument synthesis.
+
+    NEEDS_MORE_DATA / INVALID_STUDY take precedence over CANDIDATE_STRUCTURE so
+    incomplete characterization on one instrument cannot be hidden by a candidate
+    finding on another.
+    """
     if not states:
         return "INVALID_STUDY"
     if all(s == "INVALID_STUDY" for s in states):
         return "INVALID_STUDY"
-    if any(s == "CANDIDATE_STRUCTURE" for s in states):
-        return "CANDIDATE_STRUCTURE"
     if any(s in ("NEEDS_MORE_DATA", "INVALID_STUDY") for s in states):
         return "NEEDS_MORE_DATA"
+    if any(s == "CANDIDATE_STRUCTURE" for s in states):
+        return "CANDIDATE_STRUCTURE"
     return "NO_MEASURABLE_STRUCTURE"
 
 

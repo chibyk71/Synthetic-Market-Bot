@@ -32,11 +32,11 @@ from smb.research.statistical_characterization import (
     gate_from_tests,
     holm_bonferroni,
     increment_distribution,
-    primary_extreme_statistic,
     resolve_pip_size_from_settings,
     run_length_statistics,
     shuffle_increments,
     synthesize_overall,
+    _combine_overall,
     transition_statistics,
     write_artifacts,
 )
@@ -529,18 +529,6 @@ def test_gate_b_inconclusive_propagates_to_overall() -> None:
 
 def test_insufficient_valid_nulls_makes_extreme_inconclusive() -> None:
     """When valid null count < min, extreme primary test is invalid/INCONCLUSIVE."""
-    from smb.research.statistical_characterization import StudyConfiguration
-
-    # Force min_valid_null very high relative to null_simulations so nulls fail sufficiency
-    cfg = StudyConfiguration(
-        null_simulations=5,
-        min_valid_null_simulations=5,
-        min_ticks_for_study=50,
-        min_extreme_events=5,
-        min_observations_for_acf=10,
-    )
-    # Series long enough for study but with structure that may yield few extreme nulls
-    # is hard to force; instead unit-test the classification path via PrimaryTestResult
     t = PrimaryTestResult(
         test_id="extreme",
         family="extreme_response",
@@ -592,7 +580,6 @@ def test_null_extreme_pipeline_uses_shuffled_series(monkeypatch) -> None:
     )
     assert len(calls) == before + 1
     assert calls[-1] == shuffled
-    assert calls[-1] != observed or shuffled == observed  # content may coincide rarely
     # Stronger: event detection was invoked with the shuffled argument object content
     assert calls[-1] is not calls[0]
 
@@ -605,3 +592,43 @@ def test_min_valid_null_config_frozen() -> None:
 
     assert MIN_VALID_NULL_SIMULATIONS == NULL_SIMULATIONS
     assert FROZEN_STUDY_CONFIG.min_valid_null_simulations == NULL_SIMULATIONS
+
+
+def test_combine_overall_needs_more_data_over_candidate() -> None:
+    assert (
+        _combine_overall(["CANDIDATE_STRUCTURE", "NEEDS_MORE_DATA"])
+        == "NEEDS_MORE_DATA"
+    )
+    assert (
+        _combine_overall(["NEEDS_MORE_DATA", "CANDIDATE_STRUCTURE"])
+        == "NEEDS_MORE_DATA"
+    )
+
+
+def test_combine_overall_invalid_over_candidate() -> None:
+    assert (
+        _combine_overall(["CANDIDATE_STRUCTURE", "INVALID_STUDY"])
+        == "NEEDS_MORE_DATA"
+    )
+    assert (
+        _combine_overall(["INVALID_STUDY", "CANDIDATE_STRUCTURE"])
+        == "NEEDS_MORE_DATA"
+    )
+
+
+def test_combine_overall_all_invalid() -> None:
+    assert _combine_overall(["INVALID_STUDY", "INVALID_STUDY"]) == "INVALID_STUDY"
+
+
+def test_combine_overall_candidate_with_not_detected() -> None:
+    assert (
+        _combine_overall(["CANDIDATE_STRUCTURE", "NO_MEASURABLE_STRUCTURE"])
+        == "CANDIDATE_STRUCTURE"
+    )
+
+
+def test_combine_overall_all_not_detected() -> None:
+    assert (
+        _combine_overall(["NO_MEASURABLE_STRUCTURE", "NO_MEASURABLE_STRUCTURE"])
+        == "NO_MEASURABLE_STRUCTURE"
+    )
