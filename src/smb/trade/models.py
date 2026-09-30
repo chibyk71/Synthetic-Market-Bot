@@ -104,7 +104,9 @@ class TradeCandidate:
     risk_amount: float
     position_size: float
 
-    source_signal: StrategySignal
+    # Optional: ICT StrategyEngine signals supply this; research tournament
+    # strategies (6E) may omit it. Simulation and core metrics do not require it.
+    source_signal: StrategySignal | None = None
 
 
 @dataclass(frozen=True, slots=True)
