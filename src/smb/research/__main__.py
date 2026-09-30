@@ -10,6 +10,7 @@ Commands:
   run-horizon-exit-study   Milestone 6B: horizon-aware trade construction & exit study
   run-strategy-filter-experiment  Milestone 6C: controlled strategy filter experiments
   run-statistical-characterization  Milestone 6D: instrument statistical characterization
+  run-strategy-tournament  Milestone 6E: short-horizon strategy tournament
 
 Optional flags on run: --analysis / --analysis-json, --diagnostic / --diagnostic-json
 """
@@ -999,6 +1000,15 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     p_stat.set_defaults(func=cmd_run_statistical_characterization)
+
+
+    from smb.research.tournament.cli import add_tournament_parser
+    add_tournament_parser(
+        sub,
+        load_settings=_load_settings,
+        data_root_fn=_data_root,
+        strategy_from_settings=_strategy_from_settings,
+    )
 
     args = parser.parse_args(argv)
     return int(args.func(args))
